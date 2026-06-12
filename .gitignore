@@ -1,0 +1,15 @@
+# build artifacts
+.build/
+__pycache__/
+*.pyc
+
+# local environments
+.venv/
+
+# machine-/user-specific state (per-user head calibration — regenerate with
+# `run_engine.sh --calibrate`)
+engine/axes.json
+
+# logs & OS noise
+*.log
+.DS_Store
