@@ -19,13 +19,15 @@ import tty
 
 import config
 import cursor
-from calibrate import load_axes, run_calibration
+import snap
+from calibrate import load_axes, run_calibration, save_axes
 from dwell import DwellClicker
 from filters import OneEuro
 from gestures import TiltDetector
 from imu_rx import IMUReceiver
 from mapping import AbsoluteMapper
 from pose import head_euler
+from targets import TargetTracker
 
 
 def uptime_now() -> float:
@@ -80,6 +82,11 @@ def run(debug_angles: bool = False) -> None:
                          config.DWELL_REARM_RADIUS_PX)
     dwell.enabled = False  # SAFETY: clicking is opt-in, never on at launch
 
+    snap_on = config.SNAP_ENABLED
+    tracker = TargetTracker(config.TARGET_REFRESH_HZ, config.TARGET_MAX_ELEMENTS,
+                            config.TARGET_WALK_TIMEOUT_S, screen_w * screen_h)
+    tracker.start()
+
     if not cursor.accessibility_trusted():
         print("WARNING: no Accessibility permission — cursor events will be dropped.")
         print("Fix: System Settings → Privacy & Security → Accessibility → enable your terminal.\n")
@@ -93,7 +100,8 @@ def run(debug_angles: bool = False) -> None:
     print("  2. press [c]  → cursor control engages, calibrated to that pose")
     print("  3. press [d] when ready to enable dwell-clicking (starts OFF)")
     print()
-    print("keys: [c] recenter+engage  [SPACE] panic freeze  [d] clicking on/off  [q] quit")
+    print("keys: [c] recenter+engage  [SPACE] panic freeze  [d] clicking on/off")
+    print("      [s] snap-to-button on/off  [v] invert up/down  [b] invert left/right  [q] quit")
     print("gestures: park cursor = click | tilt LEFT = clicking on/off | tilt RIGHT = Claude\n")
 
     latencies: list[float] = []
@@ -120,6 +128,19 @@ def run(debug_angles: bool = False) -> None:
                 notify("cursor control " + ("RESUMED" if engaged else "FROZEN (panic)"))
             if key == "d":
                 notify(f"clicking {'ENABLED' if dwell.toggle() else 'DISABLED'} (key)")
+            if key == "s":
+                snap_on = not snap_on
+                notify(f"snap-to-button {'ON' if snap_on else 'OFF'}")
+            if key == "v":
+                mapper.y_sign *= -1.0
+                axes["y_sign"] = mapper.y_sign
+                save_axes(axes)
+                notify(f"up/down inverted (y_sign {mapper.y_sign:+.0f}) — saved")
+            if key == "b":
+                mapper.x_sign *= -1.0
+                axes["x_sign"] = mapper.x_sign
+                save_axes(axes)
+                notify(f"left/right inverted (x_sign {mapper.x_sign:+.0f}) — saved")
 
             sample = rx.latest()
             if sample is not None:
@@ -167,6 +188,7 @@ def run(debug_angles: bool = False) -> None:
                     if not frozen:
                         target = mapper.map(x_angle, y_angle)
 
+            snap_label = None
             if engaged and target is not None and not debug_angles:
                 if eased is None:
                     eased = target
@@ -175,18 +197,33 @@ def run(debug_angles: bool = False) -> None:
                 k = 1.0 - math.exp(-frame_dt / config.EASE_TIME_CONST_S)
                 eased = (eased[0] + (target[0] - eased[0]) * k,
                          eased[1] + (target[1] - eased[1]) * k)
-                cursor.move(*eased)
+
+                # Magnetic snap: pull the head-driven cursor onto the nearest
+                # real clickable element. The dwell anchors at the SNAPPED
+                # point, so clicks land dead-center on the button.
+                render_pt = eased
+                if snap_on and not frozen:
+                    tgt, dist = snap.nearest(tracker.snapshot(), eased[0], eased[1],
+                                             config.SNAP_RADIUS_PX)
+                    if tgt is not None:
+                        render_pt, w = snap.snap_point(
+                            eased, (tgt.cx, tgt.cy), dist,
+                            config.SNAP_FULL_PX, config.SNAP_RADIUS_PX)
+                        if w > 0.0:
+                            snap_label = tgt.label
+                cursor.move(*render_pt)
 
                 # No dwell while gesturing OR while pinned against a screen
                 # edge — an edge-clamped cursor is "parked" by definition and
                 # would turn screen corners into click machines.
                 if not frozen and not mapper.last_clamped:
-                    fire = dwell.update(eased[0], eased[1], time.monotonic())
+                    fire = dwell.update(render_pt[0], render_pt[1], time.monotonic())
                     if fire is not None:
                         cursor.click(*fire)
                         if config.CLICK_SOUND:
                             cursor.play_click_sound()
-                        notify(f"CLICK #{dwell.clicks} at ({fire[0]:.0f}, {fire[1]:.0f})")
+                        tag = f" → {snap_label}" if snap_label else ""
+                        notify(f"CLICK #{dwell.clicks} at ({fire[0]:.0f}, {fire[1]:.0f}){tag}")
 
             now_mono = time.monotonic()
             if latencies and now_mono - last_hud > 1.0 / config.HUD_UPDATE_HZ:
@@ -203,16 +240,23 @@ def run(debug_angles: bool = False) -> None:
                     pct = dwell.progress(now_mono)
                     state = f"click:{'▆' * int(pct * 5):<5}" if pct > 0 else "click:armed"
                 pos = f"({eased[0]:4.0f},{eased[1]:4.0f})" if eased else "(waiting)"
+                if not snap_on:
+                    snap_txt = "snap:off"
+                elif snap_label:
+                    snap_txt = f"🧲 {snap_label[:18]}"
+                else:
+                    snap_txt = f"snap:{tracker.last_count} tgts"
                 sys.stdout.write(
                     f"\rIMU {len(imu_times):3d} Hz | lat {avg:4.1f}/{p95:4.1f} ms "
-                    f"| {pos} | {state} | clicks {dwell.clicks} "
-                    f"| roll {roll_delta_deg:+5.1f}° | [c][d][q]  ")
+                    f"| {pos} | {state} | {snap_txt} | clicks {dwell.clicks} "
+                    f"| roll {roll_delta_deg:+5.1f}°  ")
                 sys.stdout.flush()
 
             sleep_left = frame_dt - (time.monotonic() - frame_start)
             if sleep_left > 0:
                 time.sleep(sleep_left)
 
+    tracker.stop()
     print("\nengine: stopped")
 
 

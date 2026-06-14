@@ -110,3 +110,9 @@ def load_axes() -> dict | None:
         return None
     with open(AXES_PATH) as f:
         return json.load(f)
+
+
+def save_axes(axes: dict) -> None:
+    """Persist axes (e.g. after a live sign flip) so the fix survives restarts."""
+    with open(AXES_PATH, "w") as f:
+        json.dump(axes, f, indent=2)

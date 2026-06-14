@@ -74,12 +74,34 @@ AirPods 4 ──CoreMotion──► bridge (Swift) ──UDP 8077 JSON──► 
 - Tuning requests come as feel descriptions ("too fast", "can't hold it").
   Map them to `config.py` knobs and explain the change in one line.
 
+## Magnetic snap (the precision fix — NOT computer vision)
+
+`targets.py` reads clickable elements (buttons/links/window controls) straight
+from the **macOS Accessibility tree** of the frontmost app, in a daemon
+thread, refreshed ~5 Hz. `snap.py` (pure, unit-tested) pulls the head-driven
+cursor onto the nearest element within `SNAP_RADIUS_PX`, fully sticking within
+`SNAP_FULL_PX`. The dwell anchors at the *snapped* point, so clicks land
+dead-center. This is the cure for "near the button but never spot-on" and
+stays inside the no-CV constraint — it's the OS's own UI map, no pixels.
+Toggle live with `s`. Same Accessibility permission the cursor already needs;
+an AX hiccup degrades to "no targets", never crashes.
+
+## Runtime axis fixes
+
+Up/down (and left/right) sign has been flaky across sessions (the calibration
+sign inference isn't fully trustworthy). Fix: live keys `v` (invert up/down)
+and `b` (invert left/right) flip the sign AND persist to `axes.json`
+immediately, so the owner is self-sufficient and we stop flip-flopping it by
+hand. If axes feel deeply wrong, re-run `--calibrate`.
+
 ## State (update when milestones move)
 
-- **M1 ✓** head→cursor, live-verified. **M2 ✓** dwell-click + tilt gestures,
-  live-verified except final precision tuning.
+- **M1 ✓** head→cursor. **M2 ✓** dwell-click + tilt gestures. **Magnetic
+  snap ✓** built + unit-tested, awaiting owner live-test (2026-06-14).
+- Current keys: `c` engage/recenter · `SPACE` panic · `d` clicking · `s` snap
+  · `v` invert ↕ · `b` invert ↔ · `q` quit.
 - **M3 (next):** tilt-right → screenshot → Claude agent reads the screen and
   acts. Currently a stub notify in `main.py`.
-- Known open items: precision tuning feedback loop with owner; drift
-  measurement over a 60s window; M3 agent design (screenshot capture,
-  Claude API call, action execution, permission story).
+- Known open items: live-validate snap feel + false-positive rate with snap on;
+  M3 agent design (screenshot capture, Claude API call, action execution,
+  permission story).

@@ -10,11 +10,21 @@ UDP_PORT = 8077
 # The engine refuses to start without it.
 
 # --- absolute mapping ---
-# Head sweep (degrees from center) that spans the full screen. Smaller = more
-# sensitive but amplifies IMU drift/jitter. Start moderate; tighten toward
-# ±4° (the "invisible glance" target) only once control is stable.
-X_RANGE_DEG = 16.0
-Y_RANGE_DEG = 12.0
+# Head sweep (degrees from center) that spans the full screen. Larger = slower
+# / less twitchy (more head travel per pixel). Magnetic snap covers the
+# last-few-pixels precision, so this can stay comfortably slow.
+X_RANGE_DEG = 20.0
+Y_RANGE_DEG = 15.0
+
+# --- magnetic targeting (snap-to-button) ---
+# Reads real clickable elements from the macOS Accessibility tree (NOT vision)
+# and pulls the cursor onto the nearest one — fixes "near but never spot-on".
+SNAP_ENABLED = True
+SNAP_RADIUS_PX = 95.0         # within this of a target, the cursor gets pulled in
+SNAP_FULL_PX = 26.0          # within this, cursor fully sticks to target center
+TARGET_REFRESH_HZ = 5.0      # how often the background thread re-scans the UI
+TARGET_WALK_TIMEOUT_S = 0.35  # bail out of a slow AX-tree walk (e.g. huge pages)
+TARGET_MAX_ELEMENTS = 500    # safety cap on elements collected per scan
 
 # --- dwell click ---
 DWELL_RADIUS_PX = 45.0        # cursor must stay inside this circle...
