@@ -80,7 +80,8 @@ def run(debug_angles: bool = False) -> None:
                             axes["tilt_sign"])
     fx = OneEuro(config.FILTER_MIN_CUTOFF, config.FILTER_BETA, config.FILTER_D_CUTOFF)
     fy = OneEuro(config.FILTER_MIN_CUTOFF, config.FILTER_BETA, config.FILTER_D_CUTOFF)
-    dwell = DwellClicker(config.DWELL_RADIUS_PX, config.DWELL_TIME_S,
+    dwell = DwellClicker(config.DWELL_RADIUS_PX,
+                         axes.get("dwell_time", config.DWELL_TIME_S),
                          config.DWELL_REARM_RADIUS_PX)
     dwell.enabled = False  # SAFETY: clicking is opt-in, never on at launch
 
@@ -106,8 +107,9 @@ def run(debug_angles: bool = False) -> None:
     print("  3. press [d] when ready to enable dwell-clicking (starts OFF)")
     print()
     print("keys: [c] recenter+engage  [SPACE] panic freeze  [d] clicking on/off")
-    print("      [-]/[=] sensitivity down/up  [s] snap on/off  [i] flip scroll dir")
-    print("      [v] invert up/down  [b] invert left/right  [p] diagnostics  [q] quit")
+    print("      [-]/[=] sensitivity  [ [ ]/[ ] ] click speed  [s] snap on/off")
+    print("      [i] flip scroll dir  [v] invert up/down  [b] invert left/right")
+    print("      [p] diagnostics  [q] quit")
     print("scroll: rest cursor near the TOP or BOTTOM edge of the screen to scroll")
     print("gestures: park cursor = click | tilt LEFT = clicking on/off | tilt RIGHT = Claude\n")
 
@@ -137,6 +139,16 @@ def run(debug_angles: bool = False) -> None:
                 notify("cursor control " + ("RESUMED" if engaged else "FROZEN (panic)"))
             if key == "d":
                 notify(f"clicking {'ENABLED' if dwell.toggle() else 'DISABLED'} (key)")
+            if key == "[":
+                dwell.dwell_s = max(0.2, round(dwell.dwell_s - 0.1, 2))
+                axes["dwell_time"] = dwell.dwell_s
+                save_axes(axes)
+                notify(f"click faster — hold {dwell.dwell_s:.2f}s (saved)")
+            if key == "]":
+                dwell.dwell_s = min(2.0, round(dwell.dwell_s + 0.1, 2))
+                axes["dwell_time"] = dwell.dwell_s
+                save_axes(axes)
+                notify(f"click slower — hold {dwell.dwell_s:.2f}s (saved)")
             if key == "s":
                 snap_on = not snap_on
                 notify(f"snap-to-button {'ON' if snap_on else 'OFF'}")

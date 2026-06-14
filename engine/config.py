@@ -41,7 +41,7 @@ SCROLL_INVERT = False        # flip with [i] live if direction feels backwards
 
 # --- dwell click ---
 DWELL_RADIUS_PX = 45.0        # cursor must stay inside this circle...
-DWELL_TIME_S = 0.8            # ...for this long => one click at the anchor
+DWELL_TIME_S = 0.5            # ...for this long => one click (live-tune [ ])
 DWELL_REARM_RADIUS_PX = 70.0  # must exit this larger circle to arm the next click
 CLICK_SOUND = True            # audible tick on click (demo feedback)
 
