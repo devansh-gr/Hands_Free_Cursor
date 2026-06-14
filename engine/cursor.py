@@ -25,6 +25,16 @@ def click(x: float, y: float) -> None:
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
+def scroll(pixels: int) -> None:
+    """Post a vertical scroll-wheel event. Positive = scroll up (content moves
+    toward the bottom); macOS 'natural scrolling' may invert what's visible,
+    which the engine's invert toggle compensates for."""
+    event = Quartz.CGEventCreateScrollWheelEvent(
+        None, Quartz.kCGScrollEventUnitPixel, 1, int(pixels)
+    )
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+
 def play_click_sound() -> None:
     """Soft audible tick so click feedback is felt without looking at the HUD."""
     try:

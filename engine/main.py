@@ -19,6 +19,7 @@ import tty
 
 import config
 import cursor
+import scroll
 import snap
 from calibrate import load_axes, run_calibration, save_axes
 from dwell import DwellClicker
@@ -74,6 +75,7 @@ def run(debug_angles: bool = False) -> None:
             screen_w, screen_h, config.X_RANGE_DEG, config.Y_RANGE_DEG,
             axes["x_sign"], axes["y_sign"],
         )
+        mapper.set_scale(axes.get("range_scale", 1.0))  # persisted sensitivity
         tilt = TiltDetector(config.TILT_THRESHOLD_DEG, config.TILT_HOLD_S,
                             axes["tilt_sign"])
     fx = OneEuro(config.FILTER_MIN_CUTOFF, config.FILTER_BETA, config.FILTER_D_CUTOFF)
@@ -83,6 +85,9 @@ def run(debug_angles: bool = False) -> None:
     dwell.enabled = False  # SAFETY: clicking is opt-in, never on at launch
 
     snap_on = config.SNAP_ENABLED
+    scroll_invert = config.SCROLL_INVERT
+    scroll_accum = 0.0
+    scroll_arm_t: float | None = None
     tracker = TargetTracker(config.TARGET_REFRESH_HZ, config.TARGET_MAX_ELEMENTS,
                             config.TARGET_WALK_TIMEOUT_S, screen_w * screen_h)
     tracker.start()
@@ -101,13 +106,17 @@ def run(debug_angles: bool = False) -> None:
     print("  3. press [d] when ready to enable dwell-clicking (starts OFF)")
     print()
     print("keys: [c] recenter+engage  [SPACE] panic freeze  [d] clicking on/off")
-    print("      [s] snap-to-button on/off  [v] invert up/down  [b] invert left/right  [q] quit")
+    print("      [-]/[=] sensitivity down/up  [s] snap on/off  [i] flip scroll dir")
+    print("      [v] invert up/down  [b] invert left/right  [p] diagnostics  [q] quit")
+    print("scroll: rest cursor near the TOP or BOTTOM edge of the screen to scroll")
     print("gestures: park cursor = click | tilt LEFT = clicking on/off | tilt RIGHT = Claude\n")
 
     latencies: list[float] = []
     imu_times: list[float] = []
     target: tuple[float, float] | None = None
     eased: tuple[float, float] | None = None
+    prev_eased: tuple[float, float] | None = None
+    speed_ema = 0.0  # smoothed cursor speed (px/s), for the snap velocity gate
     roll_delta_deg = 0.0
     frozen = False
     engaged = False  # SAFETY: no cursor output until the user presses [c]
@@ -131,6 +140,30 @@ def run(debug_angles: bool = False) -> None:
             if key == "s":
                 snap_on = not snap_on
                 notify(f"snap-to-button {'ON' if snap_on else 'OFF'}")
+            if key == "i":
+                scroll_invert = not scroll_invert
+                notify(f"scroll direction {'inverted' if scroll_invert else 'normal'}")
+            if key == "p":
+                notify(f"[diag] reading app='{tracker.app_name}'  "
+                       f"targets={tracker.last_count}  "
+                       f"clicking={'ON' if dwell.enabled else 'OFF'}  "
+                       f"snap={'ON' if snap_on else 'OFF'}")
+                if eased is not None:
+                    near = sorted(tracker.snapshot(),
+                                  key=lambda t: (t.cx - eased[0]) ** 2 + (t.cy - eased[1]) ** 2)
+                    for t in near[:4]:
+                        d = ((t.cx - eased[0]) ** 2 + (t.cy - eased[1]) ** 2) ** 0.5
+                        notify(f"   {d:5.0f}px  {t.role:14s} '{t.label[:22]}' @({t.cx:.0f},{t.cy:.0f})")
+            if key in ("-", "_"):
+                s = mapper.set_scale(mapper.scale * 1.15)
+                axes["range_scale"] = s
+                save_axes(axes)
+                notify(f"less sensitive — sweep ±{mapper.x_range_deg:.0f}° (saved)")
+            if key in ("=", "+"):
+                s = mapper.set_scale(mapper.scale * 0.87)
+                axes["range_scale"] = s
+                save_axes(axes)
+                notify(f"more sensitive — sweep ±{mapper.x_range_deg:.0f}° (saved)")
             if key == "v":
                 mapper.y_sign *= -1.0
                 axes["y_sign"] = mapper.y_sign
@@ -189,6 +222,7 @@ def run(debug_angles: bool = False) -> None:
                         target = mapper.map(x_angle, y_angle)
 
             snap_label = None
+            scrolling = False
             if engaged and target is not None and not debug_angles:
                 if eased is None:
                     eased = target
@@ -198,25 +232,63 @@ def run(debug_angles: bool = False) -> None:
                 eased = (eased[0] + (target[0] - eased[0]) * k,
                          eased[1] + (target[1] - eased[1]) * k)
 
+                # Cursor speed (smoothed) gates the magnet: fast = no snap.
+                if prev_eased is not None:
+                    inst = math.hypot(eased[0] - prev_eased[0],
+                                      eased[1] - prev_eased[1]) / frame_dt
+                    speed_ema = 0.35 * inst + 0.65 * speed_ema
+                prev_eased = eased
+
                 # Magnetic snap: pull the head-driven cursor onto the nearest
-                # real clickable element. The dwell anchors at the SNAPPED
-                # point, so clicks land dead-center on the button.
+                # real clickable element, but only as you SLOW to land on it.
+                # The dwell anchors at the SNAPPED point, so clicks land center.
                 render_pt = eased
+                tgt = None
                 if snap_on and not frozen:
-                    tgt, dist = snap.nearest(tracker.snapshot(), eased[0], eased[1],
-                                             config.SNAP_RADIUS_PX)
-                    if tgt is not None:
-                        render_pt, w = snap.snap_point(
-                            eased, (tgt.cx, tgt.cy), dist,
-                            config.SNAP_FULL_PX, config.SNAP_RADIUS_PX)
-                        if w > 0.0:
-                            snap_label = tgt.label
+                    gain = snap.speed_gain(speed_ema, config.SNAP_SPEED_SLOW_PX_S,
+                                           config.SNAP_SPEED_FAST_PX_S)
+                    if gain > 0.0:
+                        tgt, dist = snap.nearest(tracker.snapshot(), eased[0],
+                                                 eased[1], config.SNAP_RADIUS_PX)
+                        if tgt is not None:
+                            render_pt, w = snap.snap_point(
+                                eased, (tgt.cx, tgt.cy), dist,
+                                config.SNAP_FULL_PX, config.SNAP_RADIUS_PX,
+                                strength=gain)
+                            if w > 0.0:
+                                snap_label = tgt.label
+
+                # Edge-dwell scroll — only when NOT grabbing a clickable target,
+                # so edge toolbars/buttons stay clickable while empty edges
+                # scroll. An arm delay prevents scrolling while passing through.
+                if config.SCROLL_ENABLED and not frozen and tgt is None:
+                    sdir, sdepth = scroll.scroll_zone(
+                        eased[1], screen_h, config.SCROLL_BAND_PX)
+                    if sdir != 0:
+                        if scroll_arm_t is None:
+                            scroll_arm_t = time.monotonic()
+                        elif time.monotonic() - scroll_arm_t >= config.SCROLL_ARM_S:
+                            scrolling = True
+                            vel = scroll.scroll_velocity(
+                                sdir, sdepth, config.SCROLL_MAX_SPEED)
+                            scroll_accum += (-vel if scroll_invert else vel) * frame_dt
+                            step = int(scroll_accum)
+                            if step != 0:
+                                scroll_accum -= step
+                                cursor.scroll(step)
+                    else:
+                        scroll_arm_t = None
+                        scroll_accum = 0.0
+                else:
+                    scroll_arm_t = None
+                    scroll_accum = 0.0
+
                 cursor.move(*render_pt)
 
-                # No dwell while gesturing OR while pinned against a screen
-                # edge — an edge-clamped cursor is "parked" by definition and
-                # would turn screen corners into click machines.
-                if not frozen and not mapper.last_clamped:
+                # No dwell while gesturing, while scrolling, or while pinned
+                # against a screen edge — an edge-clamped cursor is "parked" by
+                # definition and would turn screen corners into click machines.
+                if not frozen and not scrolling and not mapper.last_clamped:
                     fire = dwell.update(render_pt[0], render_pt[1], time.monotonic())
                     if fire is not None:
                         cursor.click(*fire)
@@ -240,12 +312,14 @@ def run(debug_angles: bool = False) -> None:
                     pct = dwell.progress(now_mono)
                     state = f"click:{'▆' * int(pct * 5):<5}" if pct > 0 else "click:armed"
                 pos = f"({eased[0]:4.0f},{eased[1]:4.0f})" if eased else "(waiting)"
-                if not snap_on:
+                if scrolling:
+                    snap_txt = "⇅ scrolling"
+                elif not snap_on:
                     snap_txt = "snap:off"
                 elif snap_label:
                     snap_txt = f"🧲 {snap_label[:18]}"
                 else:
-                    snap_txt = f"snap:{tracker.last_count} tgts"
+                    snap_txt = f"snap:{tracker.last_count}·{tracker.app_name[:8]}"
                 sys.stdout.write(
                     f"\rIMU {len(imu_times):3d} Hz | lat {avg:4.1f}/{p95:4.1f} ms "
                     f"| {pos} | {state} | {snap_txt} | clicks {dwell.clicks} "

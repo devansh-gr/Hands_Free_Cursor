@@ -77,11 +77,19 @@ AirPods 4 ──CoreMotion──► bridge (Swift) ──UDP 8077 JSON──► 
 ## Magnetic snap (the precision fix — NOT computer vision)
 
 `targets.py` reads clickable elements (buttons/links/window controls) straight
-from the **macOS Accessibility tree** of the frontmost app, in a daemon
-thread, refreshed ~5 Hz. `snap.py` (pure, unit-tested) pulls the head-driven
+from the **macOS Accessibility tree** of the **window under the cursor**, in a
+daemon thread, refreshed ~5 Hz. (It must NOT scan the keyboard-focused app:
+that's the terminal running the engine, not the app the head-cursor points at
+— this was the original "snap isn't working" bug. Uses system-wide
+element-at-position → enclosing window.) `p` key dumps the live app/targets it
+sees; HUD shows `snap:N·AppName`. `snap.py` (pure, unit-tested) pulls the head-driven
 cursor onto the nearest element within `SNAP_RADIUS_PX`, fully sticking within
 `SNAP_FULL_PX`. The dwell anchors at the *snapped* point, so clicks land
-dead-center. This is the cure for "near the button but never spot-on" and
+dead-center. **Velocity gate** (`speed_gain`): the magnet strength scales with
+cursor speed — full when settling (≤`SNAP_SPEED_SLOW_PX_S`), off while
+traversing (≥`SNAP_SPEED_FAST_PX_S`). This is what stops "snaps onto every
+button I pass." Keep the radius modest (~70px); big radius + always-on = the
+over-reactive failure mode. This is the cure for "near the button but never spot-on" and
 stays inside the no-CV constraint — it's the OS's own UI map, no pixels.
 Toggle live with `s`. Same Accessibility permission the cursor already needs;
 an AX hiccup degrades to "no targets", never crashes.
@@ -94,12 +102,24 @@ and `b` (invert left/right) flip the sign AND persist to `axes.json`
 immediately, so the owner is self-sufficient and we stop flip-flopping it by
 hand. If axes feel deeply wrong, re-run `--calibrate`.
 
+## Edge-dwell scroll
+
+`scroll.py` (pure, unit-tested): rest the cursor in the top/bottom
+`SCROLL_BAND_PX` zone → content scrolls that way, speed = depth^gamma ramp
+(gentle near inner edge). No mode, no gesture — chosen over a gesture-toggle
+scroll mode because it's the most natural/hands-free. Priority rule in the
+loop: a clickable snap target under the cursor wins (so edge toolbars stay
+clickable); only empty edges scroll. `SCROLL_ARM_S` delay stops pass-through
+scrolling; suppresses dwell-click while scrolling. `cursor.scroll()` posts
+pixel-unit wheel events; `i` flips direction live (for natural-scroll setting).
+
 ## State (update when milestones move)
 
 - **M1 ✓** head→cursor. **M2 ✓** dwell-click + tilt gestures. **Magnetic
-  snap ✓** built + unit-tested, awaiting owner live-test (2026-06-14).
+  snap ✓** + **edge-scroll ✓** built + unit-tested, awaiting owner live-test
+  (2026-06-14).
 - Current keys: `c` engage/recenter · `SPACE` panic · `d` clicking · `s` snap
-  · `v` invert ↕ · `b` invert ↔ · `q` quit.
+  · `i` flip scroll dir · `v` invert ↕ · `b` invert ↔ · `q` quit.
 - **M3 (next):** tilt-right → screenshot → Claude agent reads the screen and
   acts. Currently a stub notify in `main.py`.
 - Known open items: live-validate snap feel + false-positive rate with snap on;

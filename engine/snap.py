@@ -29,11 +29,23 @@ def pull_weight(dist: float, full_px: float, radius_px: float) -> float:
     return 1.0 - _smoothstep(full_px, radius_px, dist)
 
 
+def speed_gain(speed: float, slow_px_s: float, fast_px_s: float) -> float:
+    """Magnet strength vs. cursor speed: 1.0 when settling (<= slow), 0.0 while
+    traversing (>= fast), smooth between. This is what stops the cursor getting
+    yanked onto every button it passes — the magnet only acts when you slow to
+    land on a target."""
+    if speed <= slow_px_s:
+        return 1.0
+    if speed >= fast_px_s:
+        return 0.0
+    return 1.0 - _smoothstep(slow_px_s, fast_px_s, speed)
+
+
 def snap_point(cursor_xy: tuple[float, float], target_xy: tuple[float, float],
-               dist: float, full_px: float, radius_px: float
-               ) -> tuple[tuple[float, float], float]:
-    """Blend cursor toward target by the pull weight. Returns (xy, weight)."""
-    w = pull_weight(dist, full_px, radius_px)
+               dist: float, full_px: float, radius_px: float,
+               strength: float = 1.0) -> tuple[tuple[float, float], float]:
+    """Blend cursor toward target by (pull weight x strength). Returns (xy, weight)."""
+    w = pull_weight(dist, full_px, radius_px) * max(0.0, min(1.0, strength))
     cx, cy = cursor_xy
     tx, ty = target_xy
     return (cx + (tx - cx) * w, cy + (ty - cy) * w), w

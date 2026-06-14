@@ -10,21 +10,34 @@ UDP_PORT = 8077
 # The engine refuses to start without it.
 
 # --- absolute mapping ---
-# Head sweep (degrees from center) that spans the full screen. Larger = slower
-# / less twitchy (more head travel per pixel). Magnetic snap covers the
-# last-few-pixels precision, so this can stay comfortably slow.
-X_RANGE_DEG = 20.0
-Y_RANGE_DEG = 15.0
+# Head sweep (degrees from center) that spans the full screen. Smaller = MORE
+# sensitive (less head travel per pixel). Magnetic snap covers fine precision,
+# so this can be sensitive. Live-tunable at runtime with [-]/[=]; the chosen
+# multiplier persists to axes.json (range_scale).
+X_RANGE_DEG = 12.0
+Y_RANGE_DEG = 9.0
 
 # --- magnetic targeting (snap-to-button) ---
 # Reads real clickable elements from the macOS Accessibility tree (NOT vision)
 # and pulls the cursor onto the nearest one — fixes "near but never spot-on".
 SNAP_ENABLED = True
-SNAP_RADIUS_PX = 95.0         # within this of a target, the cursor gets pulled in
-SNAP_FULL_PX = 26.0          # within this, cursor fully sticks to target center
+SNAP_RADIUS_PX = 70.0        # within this of a target, the cursor gets pulled in
+SNAP_FULL_PX = 24.0          # within this, cursor fully sticks to target center
+# Velocity gate — the magnet only engages as you SLOW to land, so sweeping
+# across the screen doesn't get yanked onto every button it passes.
+SNAP_SPEED_SLOW_PX_S = 150.0  # at/below this cursor speed: full magnet
+SNAP_SPEED_FAST_PX_S = 650.0  # at/above this cursor speed: magnet off
 TARGET_REFRESH_HZ = 5.0      # how often the background thread re-scans the UI
 TARGET_WALK_TIMEOUT_S = 0.35  # bail out of a slow AX-tree walk (e.g. huge pages)
 TARGET_MAX_ELEMENTS = 500    # safety cap on elements collected per scan
+
+# --- edge-dwell scroll ---
+SCROLL_ENABLED = True
+SCROLL_BAND_PX = 95.0        # thickness of the top/bottom edge zones
+SCROLL_MAX_SPEED = 1700.0    # pixels/sec at the very edge of the screen
+SCROLL_ARM_S = 0.18          # must linger in the band this long before scrolling
+                             # (so passing through the edge doesn't scroll)
+SCROLL_INVERT = False        # flip with [i] live if direction feels backwards
 
 # --- dwell click ---
 DWELL_RADIUS_PX = 45.0        # cursor must stay inside this circle...
