@@ -56,6 +56,16 @@ Keys while running: `c` = recenter+engage (look at screen center first),
 `space` = panic freeze, `d` = clicking on/off, `q` = quit. The engine starts
 inert: no cursor motion until `c`, no clicking until `d`.
 
+## Web control panel
+
+When the engine starts it also serves a local control panel and opens it in
+your browser at **http://127.0.0.1:8765/**. From the page you can see AirPods
+connection status + live telemetry (IMU Hz, latency, clicks), run the guided
+axis calibration, press Start/Stop, and tune sensitivity / hold-time / scroll
+speed / feature toggles — all live. Note: the browser can't read AirPods motion
+or move the cursor itself (sandbox), so the page is a front-end to the local
+engine, which must be running. Terminal keys keep working alongside it.
+
 ## Tuning
 
 Everything adjustable is in `engine/config.py`: sweep ranges (sensitivity),

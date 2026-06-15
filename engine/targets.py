@@ -4,13 +4,22 @@ This is the OS's own structured map of the UI — buttons, links, window
 controls — read straight from the app. NOT computer vision: no pixels, no
 camera, no ML. Same Accessibility permission the cursor already needs.
 
-Scans the WINDOW UNDER THE CURSOR (via the system-wide element-at-position
-API), not the keyboard-focused app — because the focused app is usually the
-terminal running the engine, not the app the head-cursor is pointing at. A
-background thread re-scans periodically so the hot render loop only ever reads
-a cached snapshot.
+Design notes that matter:
+- Scans the WINDOW UNDER THE CURSOR (system-wide element-at-position ->
+  enclosing window), not the keyboard-focused app — the focused app is the
+  terminal running the engine, not what the head-cursor points at.
+- Clickability is decided by whether the element exposes an AXPress ACTION,
+  not just by a role-name whitelist — this catches buttons that report
+  non-obvious roles (e.g. Chrome's toolbar buttons).
+- Traversal is BREADTH-FIRST so shallow window chrome (toolbar, tab strip,
+  the new-tab button) is found before a deep web page exhausts the scan
+  budget. Depth-first would dive into web content and never reach them.
+- The element directly under the cursor is always included (climbing to its
+  pressable ancestor), so whatever you're pointing at is lockable even if the
+  bounded walk didn't reach it.
 """
 
+import collections
 import threading
 import time
 
@@ -21,6 +30,7 @@ from ApplicationServices import (
     AXUIElementCreateSystemWide,
     AXUIElementCopyElementAtPosition,
     AXUIElementCopyAttributeValue,
+    AXUIElementCopyActionNames,
     AXUIElementGetPid,
     AXValueGetValue,
     kAXValueCGPointType,
@@ -34,16 +44,28 @@ from ApplicationServices import (
     kAXTitleAttribute,
 )
 
-# Roles worth snapping to: things you actually click. Deliberately excludes
-# containers, static text, and images to avoid magnet noise.
+# Fast-path roles: definitely clickable, skip the action lookup.
 CLICKABLE_ROLES = {
     "AXButton", "AXLink", "AXMenuButton", "AXPopUpButton", "AXCheckBox",
     "AXRadioButton", "AXDisclosureTriangle", "AXCloseButton",
     "AXMinimizeButton", "AXZoomButton", "AXToolbarButton", "AXSegment",
-    "AXStepper", "AXIncrementor", "AXSwitch", "AXTabButton",
+    "AXStepper", "AXIncrementor", "AXSwitch", "AXTabButton", "AXMenuItem",
 }
 
-_MAX_DEPTH = 70
+# Pure structure/content roles: never pressable, skip the action lookup to
+# keep scans fast (these dominate a UI tree by count).
+_NEVER = {
+    "AXStaticText", "AXTextArea", "AXTextField", "AXImage", "AXHeading",
+    "AXGroup", "AXScrollArea", "AXScrollBar", "AXList", "AXTable", "AXRow",
+    "AXColumn", "AXCell", "AXOutline", "AXSplitGroup", "AXLayoutArea",
+    "AXLayoutItem", "AXWebArea", "AXMenuBar", "AXToolbar", "AXTabGroup",
+    "AXUnknown", "AXValueIndicator", "AXGenericElement",
+}
+
+_MAX_DEPTH = 60
+_MAX_NODES = 8000           # hard cap on elements visited per scan
+MAX_TARGET_H = 1e9          # set from config by TargetTracker; caps snap-target
+                            # height so big thumbnails/cards aren't magnets
 _syswide = AXUIElementCreateSystemWide()
 
 
@@ -64,6 +86,15 @@ def _mouse_point() -> tuple[float, float]:
     return loc.x, loc.y
 
 
+def _is_clickable(elem, role) -> bool:
+    if role in CLICKABLE_ROLES:
+        return True
+    if role in _NEVER or role is None:
+        return False
+    err, actions = AXUIElementCopyActionNames(elem, None)
+    return err == 0 and actions is not None and "AXPress" in actions
+
+
 def _rect(elem):
     pos = _attr(elem, kAXPositionAttribute)
     size = _attr(elem, kAXSizeAttribute)
@@ -76,9 +107,20 @@ def _rect(elem):
     return float(point.x), float(point.y), float(dim.width), float(dim.height)
 
 
+def _make_target(elem, role, max_area):
+    r = _rect(elem)
+    if r is None:
+        return None
+    x, y, w, h = r
+    # Skip zero/sub-pixel, too-tall (thumbnails/cards), and whole-pane
+    # "clickable" containers that would otherwise magnet a big region.
+    if not (6.0 < w and 6.0 < h <= MAX_TARGET_H and (w * h) < max_area):
+        return None
+    label = _attr(elem, kAXTitleAttribute) or role
+    return Target(x + w / 2.0, y + h / 2.0, role, str(label))
+
+
 def _enclosing_window(elem):
-    """The AXWindow containing elem, or None. Tries the direct attribute, then
-    climbs parents."""
     win = _attr(elem, kAXWindowAttribute)
     if win is not None:
         return win
@@ -93,23 +135,45 @@ def _enclosing_window(elem):
     return None
 
 
-def _walk(elem, out, deadline, max_elems, max_area, depth=0):
-    if depth > _MAX_DEPTH or len(out) >= max_elems or time.monotonic() > deadline:
-        return
-    role = _attr(elem, kAXRoleAttribute)
-    if role in CLICKABLE_ROLES:
-        r = _rect(elem)
-        if r is not None:
-            x, y, w, h = r
-            # Skip zero/sub-pixel and whole-pane "clickable" containers that
-            # would otherwise swallow the whole screen as one magnet.
-            if 6.0 < w and 6.0 < h and (w * h) < max_area:
-                label = _attr(elem, kAXTitleAttribute) or role
-                out.append(Target(x + w / 2.0, y + h / 2.0, role, str(label)))
-    for child in _attr(elem, kAXChildrenAttribute) or ():
-        if len(out) >= max_elems or time.monotonic() > deadline:
+def _pressable_self_or_ancestor(elem, max_area):
+    """The element under the cursor (or its nearest pressable ancestor) as a
+    Target — guarantees the thing you're pointing at is always snappable."""
+    cur = elem
+    for _ in range(8):
+        role = _attr(cur, kAXRoleAttribute)
+        if _is_clickable(cur, role):
+            return _make_target(cur, role, max_area)
+        parent = _attr(cur, kAXParentAttribute)
+        if parent is None:
+            return None
+        cur = parent
+    return None
+
+
+def _walk_bfs(root, deadline, max_elems, max_area):
+    """Breadth-first collection of clickable targets, bounded by time, count,
+    and total nodes visited."""
+    out: list[Target] = []
+    seen = set()
+    nodes = 0
+    queue = collections.deque(((root, 0),))
+    while queue and len(out) < max_elems and nodes < _MAX_NODES:
+        if time.monotonic() > deadline:
             break
-        _walk(child, out, deadline, max_elems, max_area, depth + 1)
+        elem, depth = queue.popleft()
+        nodes += 1
+        role = _attr(elem, kAXRoleAttribute)
+        if _is_clickable(elem, role):
+            t = _make_target(elem, role, max_area)
+            if t is not None:
+                key = (round(t.cx), round(t.cy))
+                if key not in seen:
+                    seen.add(key)
+                    out.append(t)
+        if depth < _MAX_DEPTH:
+            for child in _attr(elem, kAXChildrenAttribute) or ():
+                queue.append((child, depth + 1))
+    return out, seen
 
 
 def _app_name(pid: int) -> str:
@@ -133,8 +197,13 @@ def scan_under_cursor(max_elems: int, timeout_s: float, max_area: float):
             return _scan_frontmost(max_elems, timeout_s, max_area)
         root = AXUIElementCreateApplication(pid)
 
-    out: list[Target] = []
-    _walk(root, out, time.monotonic() + timeout_s, max_elems, max_area)
+    out, seen = _walk_bfs(root, time.monotonic() + timeout_s, max_elems, max_area)
+
+    # Guarantee the element under the cursor is snappable even if the bounded
+    # walk missed it (e.g. deep inside a huge page).
+    here = _pressable_self_or_ancestor(elem, max_area)
+    if here is not None and (round(here.cx), round(here.cy)) not in seen:
+        out.append(here)
     return name, out
 
 
@@ -143,8 +212,7 @@ def _scan_frontmost(max_elems: int, timeout_s: float, max_area: float):
     if app is None:
         return "?", []
     axapp = AXUIElementCreateApplication(app.processIdentifier())
-    out: list[Target] = []
-    _walk(axapp, out, time.monotonic() + timeout_s, max_elems, max_area)
+    out, _ = _walk_bfs(axapp, time.monotonic() + timeout_s, max_elems, max_area)
     return app.localizedName(), out
 
 
@@ -152,8 +220,10 @@ class TargetTracker(threading.Thread):
     """Background AX scanner. snapshot() is the only thing the render loop calls."""
 
     def __init__(self, refresh_hz: float, max_elems: int, timeout_s: float,
-                 screen_area: float) -> None:
+                 screen_area: float, max_target_h: float = 1e9) -> None:
         super().__init__(daemon=True)
+        global MAX_TARGET_H
+        MAX_TARGET_H = max_target_h
         self._period = 1.0 / refresh_hz
         self._max = max_elems
         self._timeout = timeout_s

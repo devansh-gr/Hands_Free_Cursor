@@ -22,14 +22,19 @@ Y_RANGE_DEG = 9.0
 # and pulls the cursor onto the nearest one — fixes "near but never spot-on".
 SNAP_ENABLED = True
 SNAP_RADIUS_PX = 70.0        # within this of a target, the cursor gets pulled in
-SNAP_FULL_PX = 24.0          # within this, cursor fully sticks to target center
+SNAP_FULL_PX = 36.0          # within this, cursor fully sticks to target center
+                             # (generous so small buttons lock + dwell-click)
+# Don't snap to BIG targets — video thumbnails/cards are tall links and would
+# magnet the cursor all over content pages (e.g. YouTube). Real controls
+# (buttons, tabs, toolbar items, text links) are short.
+SNAP_MAX_TARGET_H = 64.0
 # Velocity gate — the magnet only engages as you SLOW to land, so sweeping
 # across the screen doesn't get yanked onto every button it passes.
 SNAP_SPEED_SLOW_PX_S = 150.0  # at/below this cursor speed: full magnet
 SNAP_SPEED_FAST_PX_S = 650.0  # at/above this cursor speed: magnet off
 TARGET_REFRESH_HZ = 5.0      # how often the background thread re-scans the UI
-TARGET_WALK_TIMEOUT_S = 0.35  # bail out of a slow AX-tree walk (e.g. huge pages)
-TARGET_MAX_ELEMENTS = 500    # safety cap on elements collected per scan
+TARGET_WALK_TIMEOUT_S = 0.5   # bail out of a slow AX-tree walk (e.g. huge pages)
+TARGET_MAX_ELEMENTS = 1500   # safety cap on elements collected per scan
 
 # --- edge-dwell scroll ---
 SCROLL_ENABLED = True
@@ -40,16 +45,27 @@ SCROLL_ARM_S = 0.18          # must linger in the band this long before scrollin
 SCROLL_INVERT = False        # flip with [i] live if direction feels backwards
 
 # --- dwell click ---
-DWELL_RADIUS_PX = 45.0        # cursor must stay inside this circle...
+# Radius is GENEROUS on purpose: head control jitters/drifts, so a tight circle
+# means the dwell timer keeps resetting and never fires (the "panel never shows
+# up" bug). 80px tolerates natural wobble while you settle.
+DWELL_RADIUS_PX = 80.0        # cursor must stay inside this circle...
 DWELL_TIME_S = 0.5            # ...for this long => one click (live-tune [ ])
-DWELL_REARM_RADIUS_PX = 70.0  # must exit this larger circle to arm the next click
+DWELL_REARM_RADIUS_PX = 130.0  # must exit this larger circle to arm the next click
 CLICK_SOUND = True            # audible tick on click (demo feedback)
 
-# --- tilt gestures ---
-TILT_THRESHOLD_DEG = 14.0     # sustained tilt past this = gesture
+# --- click mode ---
+# "confirm": hover a button -> a ✓Click/✕Cancel panel pops up; glide onto a
+#            choice to select it (no accidental clicks). "direct": dwell clicks.
+# Toggle live with [m].
+CLICK_MODE = "confirm"
+CONFIRM_OPEN_S = 0.7          # hover a button this long to OPEN the panel
+CONFIRM_CHOOSE_S = 0.55       # dwell on ✓/✕ this long to SELECT it
+CONFIRM_TIMEOUT_S = 6.0       # auto-cancel if no choice is made
+
+# --- tilt gestures (the cursor never freezes from tilt) ---
+TILT_THRESHOLD_DEG = 22.0     # sustained tilt past this = gesture (deliberate)
 TILT_HOLD_S = 0.25            # must hold the tilt this long (rejects head bobbles)
-CURSOR_FREEZE_ROLL_DEG = 8.0  # cursor + dwell freeze while tilted past this,
-                              # so gestures can't drag the cursor or fire clicks
+SUMMON_DISMISS_S = 18.0       # how long Claude's answer panel stays before auto-hide
 
 # --- One Euro filter (Casiez et al. 2012) ---
 # min_cutoff fights jitter at rest; beta fights lag during fast moves.
@@ -66,3 +82,8 @@ EASE_TIME_CONST_S = 0.08  # exponential approach; smaller = snappier, more stepp
 # --- HUD ---
 HUD_UPDATE_HZ = 5.0
 LATENCY_WINDOW = 100  # samples for avg/p95 stats
+
+# --- freeze detection ---
+# The cursor only moves on fresh IMU samples (~25-32 Hz, i.e. one every
+# ~35 ms). A gap beyond this means the AirPods motion stream dropped out.
+IMU_STALL_S = 0.2

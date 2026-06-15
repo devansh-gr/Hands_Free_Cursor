@@ -82,10 +82,25 @@ daemon thread, refreshed ~5 Hz. (It must NOT scan the keyboard-focused app:
 that's the terminal running the engine, not the app the head-cursor points at
 — this was the original "snap isn't working" bug. Uses system-wide
 element-at-position → enclosing window.) `p` key dumps the live app/targets it
-sees; HUD shows `snap:N·AppName`. `snap.py` (pure, unit-tested) pulls the head-driven
+sees; HUD shows `snap:N·AppName`.
+
+Recognition robustness (Chrome new-tab was being missed): clickability is
+decided by the **AXPress action**, not just a role whitelist; traversal is
+**breadth-first** so shallow window chrome is found before a deep web page
+exhausts the budget (DFS dove into web content and never reached the toolbar);
+and the **element under the cursor is always added** (climb to pressable
+ancestor) so the pointed-at thing is lockable even if the bounded walk missed
+it. Budget: 1500 elems / 8000 nodes / 0.5 s.
+
+`snap.py` (pure, unit-tested) pulls the head-driven
 cursor onto the nearest element within `SNAP_RADIUS_PX`, fully sticking within
 `SNAP_FULL_PX`. The dwell anchors at the *snapped* point, so clicks land
-dead-center. **Velocity gate** (`speed_gain`): the magnet strength scales with
+dead-center. Snap ignores targets taller than `SNAP_MAX_TARGET_H` (~64px) so
+big thumbnails/cards (YouTube) don't magnet the cursor; real controls are
+short. Top-edge buttons (Chrome new-tab/close): the edge-clamp dwell guard
+blocks clicks at a clamped screen edge (anti corner-click-machine), BUT a
+snapped target is a real button, so clicks are allowed when locked onto one
+even at the clamp (`tgt is not None or not mapper.last_clamped`). **Velocity gate** (`speed_gain`): the magnet strength scales with
 cursor speed — full when settling (≤`SNAP_SPEED_SLOW_PX_S`), off while
 traversing (≥`SNAP_SPEED_FAST_PX_S`). This is what stops "snaps onto every
 button I pass." Keep the radius modest (~70px); big radius + always-on = the
@@ -108,10 +123,101 @@ hand. If axes feel deeply wrong, re-run `--calibrate`.
 `SCROLL_BAND_PX` zone → content scrolls that way, speed = depth^gamma ramp
 (gentle near inner edge). No mode, no gesture — chosen over a gesture-toggle
 scroll mode because it's the most natural/hands-free. Priority rule in the
-loop: a clickable snap target under the cursor wins (so edge toolbars stay
-clickable); only empty edges scroll. `SCROLL_ARM_S` delay stops pass-through
-scrolling; suppresses dwell-click while scrolling. `cursor.scroll()` posts
+loop: scroll engages when there's no snap target OR when the head is pushed
+PAST the edge (`mapper.last_clamped`). So resting on a top toolbar button
+clicks it, but pushing further up scrolls up past the toolbar — this fixed
+"scrolling up is a pain." `SCROLL_ARM_S` delay stops pass-through scrolling;
+dwell-click suppressed while scrolling. `cursor.scroll()` posts
 pixel-unit wheel events; `i` flips direction live (for natural-scroll setting).
+
+## "Random freeze" — diagnosed 2026-06-14
+
+It was the **tilt-freeze**, not AirPods. The cursor froze while head-roll
+exceeded the threshold (so it couldn't drag during a gesture); for this user
+"look up" cross-couples into the tilt channel, so it froze exactly when trying
+to go up. **Tilt-freeze REMOVED entirely** (owner request) — the cursor never
+freezes from tilt now. Tilt gestures default OFF (`gestures_on=False`), enable
+with `g` only when M3's Claude-summon needs them (and even then, no freeze).
+Separately, IMU-stall instrumentation exists (`freezes N` counter + `⚠ NO IMU`
+HUD state + a "resumed after X ms" notify) for real AirPods motion dropouts —
+distinct from the (now-removed) tilt-freeze.
+
+## Confirm-click (default click mode)
+
+`confirm.py` — hold the cursor still for `CONFIRM_OPEN_S` (~1.2s) → a floating
+Cocoa panel pops up with **✓ Click** / **✕ Cancel**; glide onto a choice and
+dwell `CONFIRM_CHOOSE_S` (~0.6s) to select. Opens on ANY dwell (not just
+recognized snap targets) so unrecognized buttons / Dock+app icons still work —
+the click target is the snapped center if snapped, else the cursor position.
+Panel is a dark rounded card with two pill buttons + a sweep progress fill. ✓ performs the real click at the
+saved target; ✕ / timeout cancels. Eliminates accidental clicks. The panel is
+a borderless floating NSWindow (level 1000, ignores mouse) created lazily and
+pumped via the run loop each frame; geometry (`confirm_layout`, `region_at`)
+is pure/unit-tested. During the confirm phase the cursor snaps to the two
+panel buttons only. Falls back to "direct" mode if the window layer is
+unavailable. `m` toggles confirm/direct; `d` still gates all clicking.
+A separate `open_dwell` times the panel-open so it's independent of direct
+mode's `dwell`.
+
+## KNOWN ISSUE — dense top-left button cluster (owner is designing a fix)
+
+In the top-left of the screen (macOS menu/app controls, window traffic lights,
+toolbars) there are SO many clickable AX targets packed together that snapping
+is annoying — the magnet jumps between adjacent buttons. Do NOT fix this yet;
+the owner wants to design the solution himself. Ideas parked for later:
+per-region snap cooldown, a "snap to the target you're moving toward" velocity
+heuristic, temporarily widening SNAP_FULL only for isolated targets, or a
+density check that weakens the magnet where targets are clustered.
+
+## Web control panel (`server.py` + `web/index.html`)
+
+HARD BROWSER LIMITS (do not try to "move this fully into the browser"): a web
+page CANNOT read AirPods motion (no CoreMotion/Web-Bluetooth path) and CANNOT
+move the macOS cursor (sandbox). So the website is a **front-end to the local
+engine**, not a standalone app. `server.py` is a stdlib-only (no pip deps)
+`ThreadingHTTPServer` that serves the page, streams telemetry over **SSE**
+(`GET /events`), and takes commands over **POST `/cmd`**. The engine main loop
+`control.drain()`s commands each frame and `control.set_telemetry()`s at HUD
+rate. Engine auto-opens `http://127.0.0.1:8765/` and keeps terminal keys
+working too (dual control). Connection resets from the browser are silenced in
+`_QuietServer.handle_error`.
+
+Web also does first-run **axis calibration** (capture center/right/up/tilt →
+`compute_axes` in calibrate.py → axes.json), so the engine no longer hard-exits
+when axes.json is missing — it starts uncalibrated with `DEFAULT_AXES`, and
+engage is gated on `calibrated`. Runtime-settable from the panel: engage/stop,
+clicking, snap, scroll on/off + direction, gestures, confirm/direct mode,
+invert X/Y, sensitivity (mapper scale), hold time, scroll speed.
+
+## M3 — Claude summon (tilt-right "huh?")  ✓ built 2026-06-15
+
+`summon.py`: tilt head right past the gesture threshold → `screencapture -x`
+→ the local **`claude` CLI** (`claude -p ... --allowedTools Read --model
+claude-opus-4-8`) reads the shot and answers → answer shows in a floating
+Cocoa panel (`TextOverlay`). Uses the user's existing Claude Code auth — **no
+API key needed** (none was set; `anthropic` SDK isn't installed). Runs in a
+daemon thread (`Summoner`) so the 120 Hz loop never blocks; main loop polls
+`snapshot()` and renders. ~18s latency (image analysis); "looking…" panel
+covers the wait. NEEDS macOS **Screen Recording** permission for the engine's
+host (VS Code/terminal) — first summon prompts; errors degrade to a panel
+message, never a crash. Gestures are ON by default now (no freeze exists, so
+tilt is safe). `g` still toggles them. To speed up / change behavior: `MODEL`
+and `DEFAULT_PROMPT` in summon.py.
+
+NOTE: this is "Claude reads the screen and answers", not yet "Claude acts on
+the screen" (autonomous clicking/typing). Acting would be a computer-use loop —
+deferred. The CLI already has tools, so a future version could allow-list more
+than Read to let it act.
+
+## Clicking reliability (the "panel never shows up" fix, 2026-06-15)
+
+Dwell was failing because the radius (45px) + open time (1.2s) were too tight
+for head jitter — the timer kept resetting, so the confirm panel almost never
+opened. Now: `DWELL_RADIUS_PX=80`, `DWELL_REARM_RADIUS_PX=130`,
+`CONFIRM_OPEN_S=0.7`. Also clicking now defaults **ON in confirm mode**
+(`dwell.enabled = (click_mode == "confirm")`) — safe because nothing fires
+without the ✓ confirm. Confirm opens on ANY dwell (see confirm section), so it
+works on app/Dock buttons snap doesn't recognize.
 
 ## State (update when milestones move)
 
@@ -120,8 +226,9 @@ pixel-unit wheel events; `i` flips direction live (for natural-scroll setting).
   (2026-06-14).
 - Current keys: `c` engage/recenter · `SPACE` panic · `d` clicking · `s` snap
   · `i` flip scroll dir · `v` invert ↕ · `b` invert ↔ · `q` quit.
-- **M3 (next):** tilt-right → screenshot → Claude agent reads the screen and
-  acts. Currently a stub notify in `main.py`.
-- Known open items: live-validate snap feel + false-positive rate with snap on;
-  M3 agent design (screenshot capture, Claude API call, action execution,
-  permission story).
+- **M3 ✓** tilt-right → screenshot → `claude` CLI reads screen → answer panel
+  (summon.py). Built + verified end-to-end (~18s). "Reads + answers", not yet
+  "acts".
+- Known open items: live-validate snap feel + false-positive rate; summon
+  latency (~18s — could try haiku or a real API key for speed); optional
+  "Claude acts" computer-use upgrade; the parked top-left-cluster snap issue.

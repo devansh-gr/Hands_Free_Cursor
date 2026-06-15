@@ -16,18 +16,22 @@ import sys
 import termios
 import time
 import tty
+import webbrowser
 
 import config
+import confirm
 import cursor
 import scroll
 import snap
-from calibrate import load_axes, run_calibration, save_axes
+import summon as summon_mod
+from calibrate import compute_axes, load_axes, run_calibration, save_axes
 from dwell import DwellClicker
 from filters import OneEuro
 from gestures import TiltDetector
 from imu_rx import IMUReceiver
 from mapping import AbsoluteMapper
-from pose import head_euler
+from pose import head_euler, wrap_angle
+from server import Control, ControlServer
 from targets import TargetTracker
 
 
@@ -61,37 +65,79 @@ def notify(msg: str) -> None:
     sys.stdout.flush()
 
 
+DEFAULT_AXES = {"x_source": "heading", "x_sign": 1.0,
+                "y_source": "elevation", "y_sign": -1.0,
+                "tilt_source": "tilt", "tilt_sign": 1.0}
+
+
 def run(debug_angles: bool = False) -> None:
-    axes = load_axes()
-    if axes is None and not debug_angles:
-        print("No axis calibration found. Run once (20s, guided):")
-        print("  ~/Documents/Projects/AirPods_Telekinesis/run_engine.sh --calibrate")
-        sys.exit(1)
+    loaded = load_axes()
+    calibrated = loaded is not None
+    axes = loaded if loaded is not None else dict(DEFAULT_AXES)
 
     rx = IMUReceiver(config.UDP_HOST, config.UDP_PORT)
     screen_w, screen_h = cursor.screen_size()
-    if axes is not None:
-        mapper = AbsoluteMapper(
-            screen_w, screen_h, config.X_RANGE_DEG, config.Y_RANGE_DEG,
-            axes["x_sign"], axes["y_sign"],
-        )
-        mapper.set_scale(axes.get("range_scale", 1.0))  # persisted sensitivity
-        tilt = TiltDetector(config.TILT_THRESHOLD_DEG, config.TILT_HOLD_S,
-                            axes["tilt_sign"])
+    mapper = AbsoluteMapper(
+        screen_w, screen_h, config.X_RANGE_DEG, config.Y_RANGE_DEG,
+        axes["x_sign"], axes["y_sign"],
+    )
+    mapper.set_scale(axes.get("range_scale", 1.0))  # persisted sensitivity
+    tilt = TiltDetector(config.TILT_THRESHOLD_DEG, config.TILT_HOLD_S,
+                        axes["tilt_sign"])
     fx = OneEuro(config.FILTER_MIN_CUTOFF, config.FILTER_BETA, config.FILTER_D_CUTOFF)
     fy = OneEuro(config.FILTER_MIN_CUTOFF, config.FILTER_BETA, config.FILTER_D_CUTOFF)
     dwell = DwellClicker(config.DWELL_RADIUS_PX,
                          axes.get("dwell_time", config.DWELL_TIME_S),
                          config.DWELL_REARM_RADIUS_PX)
-    dwell.enabled = False  # SAFETY: clicking is opt-in, never on at launch
+    # Confirm-click: a separate dwell opens the ✓/✕ panel on a button.
+    open_dwell = DwellClicker(config.DWELL_RADIUS_PX, config.CONFIRM_OPEN_S,
+                              config.DWELL_REARM_RADIUS_PX)
+    click_mode = config.CLICK_MODE  # "confirm" | "direct"; toggle with [m]
+    overlay = confirm.ConfirmOverlay()
+    if click_mode == "confirm" and not overlay.available:
+        click_mode = "direct"  # windowing unavailable — fall back gracefully
+    # Confirm mode is safe to leave ON (nothing clicks without confirmation), so
+    # default it on — that's what users expect. Direct mode stays opt-in.
+    dwell.enabled = (click_mode == "confirm")
+    confirm_active = False
+    panel = None  # current confirm panel layout (dict)
+    confirm_target: tuple[float, float] | None = None
+    choose_region: str | None = None
+    choose_t = 0.0
+    confirm_deadline = 0.0
+
+    # Claude summon (tilt-right): screenshot -> claude CLI -> answer panel.
+    summoner = summon_mod.Summoner()
+    summon_overlay = summon_mod.TextOverlay()
+    summon_visible = False
+    summon_last_state: str | None = None
+    summon_shown_t = 0.0
 
     snap_on = config.SNAP_ENABLED
+    gestures_on = True  # tilt-right = summon Claude; no cursor-freeze anymore
     scroll_invert = config.SCROLL_INVERT
+    scroll_enabled = config.SCROLL_ENABLED  # runtime-toggleable from the web UI
+    scroll_speed = config.SCROLL_MAX_SPEED
     scroll_accum = 0.0
     scroll_arm_t: float | None = None
     tracker = TargetTracker(config.TARGET_REFRESH_HZ, config.TARGET_MAX_ELEMENTS,
-                            config.TARGET_WALK_TIMEOUT_S, screen_w * screen_h)
+                            config.TARGET_WALK_TIMEOUT_S, screen_w * screen_h,
+                            config.SNAP_MAX_TARGET_H)
     tracker.start()
+
+    # Web control panel — the engine serves a localhost page that drives all of
+    # the below over SSE/POST (the browser itself can't touch AirPods/cursor).
+    control = Control()
+    server = ControlServer(control)
+    server.start()
+    pending_recenter = False
+    calib_capturing: str | None = None   # pose being captured ("center"/...)
+    calib_until = 0.0
+    calib_ref: dict | None = None
+    calib_acc: dict[str, float] = {}
+    calib_n = 0
+    calib_poses: dict[str, dict] = {}
+    CHANS = ("heading", "elevation", "tilt")
 
     if not cursor.accessibility_trusted():
         print("WARNING: no Accessibility permission — cursor events will be dropped.")
@@ -99,19 +145,27 @@ def run(debug_angles: bool = False) -> None:
 
     print(f"engine: listening on udp://{config.UDP_HOST}:{config.UDP_PORT}, "
           f"screen {screen_w:.0f}x{screen_h:.0f}")
+    print(f"\n  ▶ CONTROL PANEL: {server.url}  (opening in your browser)\n")
+    try:
+        webbrowser.open(server.url)
+    except Exception:
+        pass
     print("engine: waiting for first IMU sample (start the bridge, AirPods in-ear)…")
     print()
     print("SAFE START: the cursor will NOT move until you press [c].")
     print("  1. look at the CENTER of your screen")
     print("  2. press [c]  → cursor control engages, calibrated to that pose")
-    print("  3. press [d] when ready to enable dwell-clicking (starts OFF)")
+    print("  3. press [d] when ready to enable clicking (starts OFF)")
+    print()
+    print(f"CLICK MODE: {click_mode.upper()}  "
+          f"({'hover a button → ✓Click/✕Cancel panel → glide to choose' if click_mode == 'confirm' else 'dwell on a button → clicks directly'})")
     print()
     print("keys: [c] recenter+engage  [SPACE] panic freeze  [d] clicking on/off")
-    print("      [-]/[=] sensitivity  [ [ ]/[ ] ] click speed  [s] snap on/off")
-    print("      [i] flip scroll dir  [v] invert up/down  [b] invert left/right")
-    print("      [p] diagnostics  [q] quit")
+    print("      [m] click mode (confirm/direct)  [-]/[=] sensitivity  [ [ ]/[ ] ] click speed")
+    print("      [s] snap on/off  [i] flip scroll dir  [v] invert up/down  [b] invert left/right")
+    print("      [g] tilt gestures on/off  [p] diagnostics  [q] quit")
     print("scroll: rest cursor near the TOP or BOTTOM edge of the screen to scroll")
-    print("gestures: park cursor = click | tilt LEFT = clicking on/off | tilt RIGHT = Claude\n")
+    print("summon: tilt your head RIGHT ('huh?') → Claude reads your screen + answers\n")
 
     latencies: list[float] = []
     imu_times: list[float] = []
@@ -120,10 +174,14 @@ def run(debug_angles: bool = False) -> None:
     prev_eased: tuple[float, float] | None = None
     speed_ema = 0.0  # smoothed cursor speed (px/s), for the snap velocity gate
     roll_delta_deg = 0.0
-    frozen = False
     engaged = False  # SAFETY: no cursor output until the user presses [c]
     last_hud = 0.0
     frame_dt = 1.0 / config.RENDER_HZ
+    # IMU-stall detection: the cursor only moves on fresh head-motion samples,
+    # so a "freeze" usually means the AirPods motion stream dropped out.
+    last_imu_mono: float | None = None
+    imu_stalls = 0
+    stall_active = False
 
     with RawTerminal():
         while True:
@@ -152,6 +210,22 @@ def run(debug_angles: bool = False) -> None:
             if key == "s":
                 snap_on = not snap_on
                 notify(f"snap-to-button {'ON' if snap_on else 'OFF'}")
+            if key == "g":
+                gestures_on = not gestures_on
+                notify(f"tilt gestures {'ON' if gestures_on else 'OFF'}")
+            if key == "m":
+                if click_mode == "confirm":
+                    click_mode = "direct"
+                elif overlay.available:
+                    click_mode = "confirm"
+                else:
+                    notify("confirm mode unavailable (no window layer)")
+                if confirm_active:
+                    overlay.close()
+                    confirm_active = False
+                open_dwell.reset()
+                dwell.reset()
+                notify(f"click mode: {click_mode.upper()}")
             if key == "i":
                 scroll_invert = not scroll_invert
                 notify(f"scroll direction {'inverted' if scroll_invert else 'normal'}")
@@ -187,8 +261,94 @@ def run(debug_angles: bool = False) -> None:
                 save_axes(axes)
                 notify(f"left/right inverted (x_sign {mapper.x_sign:+.0f}) — saved")
 
+            # ---- commands from the web control panel ----
+            for cmd in control.drain():
+                a, v = cmd["action"], cmd.get("value")
+                if a == "engage":
+                    pending_recenter = True
+                elif a == "stop":
+                    engaged = False
+                    eased = target = None
+                    if confirm_active:
+                        overlay.close()
+                        confirm_active = False
+                    notify("stopped (web)")
+                elif a == "clicking":
+                    dwell.enabled = bool(v)
+                elif a == "snap":
+                    snap_on = bool(v)
+                elif a == "scroll_enabled":
+                    scroll_enabled = bool(v)
+                elif a == "gestures":
+                    gestures_on = bool(v)
+                elif a == "scroll_invert":
+                    scroll_invert = bool(v)
+                elif a == "confirm_mode":
+                    click_mode = "confirm" if (v and overlay.available) else "direct"
+                    if confirm_active:
+                        overlay.close()
+                        confirm_active = False
+                    open_dwell.reset()
+                    dwell.reset()
+                elif a == "invert_y":
+                    mapper.y_sign *= -1.0
+                    axes["y_sign"] = mapper.y_sign
+                    save_axes(axes)
+                elif a == "invert_x":
+                    mapper.x_sign *= -1.0
+                    axes["x_sign"] = mapper.x_sign
+                    save_axes(axes)
+                elif a == "sensitivity":
+                    mapper.set_scale(float(v))
+                    axes["range_scale"] = mapper.scale
+                    save_axes(axes)
+                elif a == "hold_time":
+                    ht = min(2.0, max(0.2, float(v)))
+                    dwell.dwell_s = ht
+                    open_dwell.dwell_s = ht
+                    axes["dwell_time"] = ht
+                    save_axes(axes)
+                elif a == "scroll_speed":
+                    scroll_speed = float(v)
+                elif a == "calib":
+                    if v in ("center", "right", "up", "tilt"):
+                        calib_capturing = v
+                        calib_ref = None
+                        calib_acc = {k: 0.0 for k in CHANS}
+                        calib_n = 0
+                        calib_until = time.monotonic() + 0.7
+                        notify(f"calibrating: hold '{v}' pose…")
+                elif a == "calib_finish":
+                    need = ("center", "right", "up", "tilt")
+                    if all(p in calib_poses for p in need):
+                        try:
+                            new_axes = compute_axes(
+                                calib_poses["center"], calib_poses["right"],
+                                calib_poses["up"], calib_poses["tilt"])
+                            new_axes["range_scale"] = mapper.scale
+                            new_axes["dwell_time"] = dwell.dwell_s
+                            axes = new_axes
+                            mapper.x_sign, mapper.y_sign = axes["x_sign"], axes["y_sign"]
+                            tilt.right_sign = axes["tilt_sign"]
+                            tilt.set_baseline(0.0)
+                            save_axes(axes)
+                            calibrated = True
+                            notify("✓ calibration saved — press Start to engage")
+                        except ValueError as e:
+                            notify(f"calibration failed: {e}")
+                    else:
+                        notify("calibration incomplete — capture all 4 poses first")
+
             sample = rx.latest()
             if sample is not None:
+                # Recovered from a motion-stream dropout — report how long it froze.
+                if stall_active and last_imu_mono is not None:
+                    froze_ms = (time.monotonic() - last_imu_mono) * 1000.0
+                    notify(f"⚠ IMU stream resumed after {froze_ms:.0f} ms freeze "
+                           f"(dropout #{imu_stalls}) — likely AirPods BLE/handoff")
+                    stall_active = False
+                last_imu_mono = time.monotonic()
+
                 now = uptime_now()
                 angles = head_euler(
                     sample["qw"], sample["qx"], sample["qy"], sample["qz"])
@@ -198,6 +358,20 @@ def run(debug_angles: bool = False) -> None:
                 if len(latencies) > config.LATENCY_WINDOW:
                     latencies.pop(0)
                 imu_times[:] = [t for t in imu_times if now - t < 1.0]
+
+                # Web axis-calibration: average a held pose over its capture window.
+                if calib_capturing is not None:
+                    if calib_ref is None:
+                        calib_ref = dict(angles)
+                    for kk in CHANS:
+                        calib_acc[kk] += wrap_angle(angles[kk] - calib_ref[kk])
+                    calib_n += 1
+                    if time.monotonic() >= calib_until and calib_n >= 5:
+                        calib_poses[calib_capturing] = {
+                            kk: calib_ref[kk] + calib_acc[kk] / calib_n for kk in CHANS}
+                        notify(f"captured '{calib_capturing}' pose ✓")
+                        calib_capturing = None
+                        calib_ref = None
 
                 if debug_angles:
                     sys.stdout.write(
@@ -211,27 +385,36 @@ def run(debug_angles: bool = False) -> None:
                 y_angle = fy(angles[axes["y_source"]], sample["t"])
                 roll_deg = math.degrees(angles[axes["tilt_source"]])
 
-                if key == "c":
-                    mapper.recenter(x_angle, y_angle)
-                    tilt.set_baseline(roll_deg)
-                    dwell.reset()
-                    engaged = True
-                    notify("recentered + ENGAGED — current pose is screen center")
+                if key == "c" or pending_recenter:
+                    pending_recenter = False
+                    if not calibrated:
+                        notify("calibrate axes first (control panel or --calibrate)")
+                    else:
+                        mapper.recenter(x_angle, y_angle)
+                        tilt.set_baseline(roll_deg)
+                        dwell.reset()
+                        engaged = True
+                        notify("recentered + ENGAGED — current pose is screen center")
 
                 if engaged:
-                    roll_delta_deg = tilt.delta_deg(roll_deg)
-                    gesture = tilt.update(roll_deg, sample["t"])
-                    if gesture == "left":
-                        notify(f"clicking {'ENABLED' if dwell.toggle() else 'DISABLED'} (tilt)")
-                    elif gesture == "right":
-                        notify("SUMMON Claude — M3 not built yet (stub)")
-                        cursor.play_click_sound()
-
-                    # While the head is tilted for a gesture, yaw/pitch cross-
-                    # couple and would drag the cursor — freeze pointing/dwell.
-                    frozen = abs(roll_delta_deg) > config.CURSOR_FREEZE_ROLL_DEG
-                    if not frozen:
-                        target = mapper.map(x_angle, y_angle)
+                    if gestures_on:
+                        roll_delta_deg = tilt.delta_deg(roll_deg)
+                        gesture = tilt.update(roll_deg, sample["t"])
+                        if gesture == "left":
+                            notify(f"clicking {'ENABLED' if dwell.toggle() else 'DISABLED'} (tilt)")
+                        elif gesture == "right":
+                            if not summoner.available:
+                                notify("Claude summon needs the `claude` CLI (not found)")
+                            elif summoner.busy():
+                                notify("Claude is already thinking…")
+                            else:
+                                summoner.start()
+                                cursor.play_click_sound()
+                                notify("🧠 tilt-right — summoning Claude on your screen")
+                    else:
+                        roll_delta_deg = 0.0
+                    # Tilt-freeze removed: the cursor never freezes from head tilt.
+                    target = mapper.map(x_angle, y_angle)
 
             snap_label = None
             scrolling = False
@@ -251,75 +434,183 @@ def run(debug_angles: bool = False) -> None:
                     speed_ema = 0.35 * inst + 0.65 * speed_ema
                 prev_eased = eased
 
-                # Magnetic snap: pull the head-driven cursor onto the nearest
-                # real clickable element, but only as you SLOW to land on it.
-                # The dwell anchors at the SNAPPED point, so clicks land center.
-                render_pt = eased
-                tgt = None
-                if snap_on and not frozen:
-                    gain = snap.speed_gain(speed_ema, config.SNAP_SPEED_SLOW_PX_S,
-                                           config.SNAP_SPEED_FAST_PX_S)
-                    if gain > 0.0:
-                        tgt, dist = snap.nearest(tracker.snapshot(), eased[0],
-                                                 eased[1], config.SNAP_RADIUS_PX)
-                        if tgt is not None:
-                            render_pt, w = snap.snap_point(
-                                eased, (tgt.cx, tgt.cy), dist,
-                                config.SNAP_FULL_PX, config.SNAP_RADIUS_PX,
-                                strength=gain)
-                            if w > 0.0:
-                                snap_label = tgt.label
+                now = time.monotonic()
 
-                # Edge-dwell scroll — only when NOT grabbing a clickable target,
-                # so edge toolbars/buttons stay clickable while empty edges
-                # scroll. An arm delay prevents scrolling while passing through.
-                if config.SCROLL_ENABLED and not frozen and tgt is None:
-                    sdir, sdepth = scroll.scroll_zone(
-                        eased[1], screen_h, config.SCROLL_BAND_PX)
-                    if sdir != 0:
-                        if scroll_arm_t is None:
-                            scroll_arm_t = time.monotonic()
-                        elif time.monotonic() - scroll_arm_t >= config.SCROLL_ARM_S:
-                            scrolling = True
-                            vel = scroll.scroll_velocity(
-                                sdir, sdepth, config.SCROLL_MAX_SPEED)
-                            scroll_accum += (-vel if scroll_invert else vel) * frame_dt
-                            step = int(scroll_accum)
-                            if step != 0:
-                                scroll_accum -= step
-                                cursor.scroll(step)
+                if confirm_active:
+                    # ---- CONFIRM PHASE: only the ✓/✕ panel is interactive ----
+                    centers = (
+                        ("click", panel["click_rect"][0] + panel["click_rect"][2] / 2,
+                         panel["click_rect"][1] + panel["click_rect"][3] / 2),
+                        ("cancel", panel["cancel_rect"][0] + panel["cancel_rect"][2] / 2,
+                         panel["cancel_rect"][1] + panel["cancel_rect"][3] / 2),
+                    )
+                    best, bd = None, float("inf")
+                    for name, cx, cy in centers:
+                        d = math.hypot(cx - eased[0], cy - eased[1])
+                        if d < bd:
+                            best, bd = (cx, cy), d
+                    render_pt = eased
+                    if bd < config.SNAP_RADIUS_PX:
+                        render_pt, _ = snap.snap_point(
+                            eased, best, bd, config.SNAP_FULL_PX,
+                            config.SNAP_RADIUS_PX, strength=1.0)
+                    cursor.move(*render_pt)
+
+                    region = confirm.region_at(panel, render_pt[0], render_pt[1])
+                    if region != choose_region:
+                        choose_region, choose_t = region, now
+                    prog = min(1.0, (now - choose_t) / config.CONFIRM_CHOOSE_S) if region else 0.0
+                    overlay.update(region, prog)
+
+                    if region is not None and now - choose_t >= config.CONFIRM_CHOOSE_S:
+                        overlay.close()
+                        confirm_active = False
+                        open_dwell.reset()
+                        if region == "click" and confirm_target is not None:
+                            cursor.move(*confirm_target)
+                            cursor.click(*confirm_target)
+                            if config.CLICK_SOUND:
+                                cursor.play_click_sound()
+                            dwell.clicks += 1
+                            notify(f"✓ CLICK #{dwell.clicks} confirmed at "
+                                   f"({confirm_target[0]:.0f}, {confirm_target[1]:.0f})")
+                        else:
+                            notify("✕ click cancelled")
+                    elif now > confirm_deadline:
+                        overlay.close()
+                        confirm_active = False
+                        open_dwell.reset()
+                        notify("confirm panel timed out — cancelled")
+                else:
+                    # ---- NORMAL PHASE: snap to page targets, scroll, click ----
+                    # Magnetic snap, gated by speed so sweeping doesn't grab.
+                    render_pt = eased
+                    tgt = None
+                    if snap_on:
+                        gain = snap.speed_gain(speed_ema, config.SNAP_SPEED_SLOW_PX_S,
+                                               config.SNAP_SPEED_FAST_PX_S)
+                        if gain > 0.0:
+                            tgt, dist = snap.nearest(tracker.snapshot(), eased[0],
+                                                     eased[1], config.SNAP_RADIUS_PX)
+                            if tgt is not None:
+                                render_pt, w = snap.snap_point(
+                                    eased, (tgt.cx, tgt.cy), dist,
+                                    config.SNAP_FULL_PX, config.SNAP_RADIUS_PX,
+                                    strength=gain)
+                                if w > 0.0:
+                                    snap_label = tgt.label
+
+                    # Edge scroll. Engages when there's no target to grab OR
+                    # when the head is pushed PAST the edge (clamped) — so you
+                    # can always scroll up by pushing up, even past a toolbar,
+                    # while merely resting on a top button still clicks it.
+                    if scroll_enabled and (tgt is None or mapper.last_clamped):
+                        sdir, sdepth = scroll.scroll_zone(
+                            eased[1], screen_h, config.SCROLL_BAND_PX)
+                        if sdir != 0:
+                            if scroll_arm_t is None:
+                                scroll_arm_t = now
+                            elif now - scroll_arm_t >= config.SCROLL_ARM_S:
+                                scrolling = True
+                                render_pt = eased       # don't stick to a target
+                                snap_label = None
+                                vel = scroll.scroll_velocity(
+                                    sdir, sdepth, scroll_speed)
+                                scroll_accum += (-vel if scroll_invert else vel) * frame_dt
+                                step = int(scroll_accum)
+                                if step != 0:
+                                    scroll_accum -= step
+                                    cursor.scroll(step)
+                        else:
+                            scroll_arm_t = None
+                            scroll_accum = 0.0
                     else:
                         scroll_arm_t = None
                         scroll_accum = 0.0
-                else:
-                    scroll_arm_t = None
-                    scroll_accum = 0.0
 
-                cursor.move(*render_pt)
+                    cursor.move(*render_pt)
 
-                # No dwell while gesturing, while scrolling, or while pinned
-                # against a screen edge — an edge-clamped cursor is "parked" by
-                # definition and would turn screen corners into click machines.
-                if not frozen and not scrolling and not mapper.last_clamped:
-                    fire = dwell.update(render_pt[0], render_pt[1], time.monotonic())
-                    if fire is not None:
-                        cursor.click(*fire)
-                        if config.CLICK_SOUND:
-                            cursor.play_click_sound()
-                        tag = f" → {snap_label}" if snap_label else ""
-                        notify(f"CLICK #{dwell.clicks} at ({fire[0]:.0f}, {fire[1]:.0f}){tag}")
+                    # Click / open-confirm. Allowed when not scrolling and not
+                    # pinned to an empty edge (so corners don't auto-fire). A
+                    # snapped target overrides the clamp guard.
+                    if (dwell.enabled and not scrolling
+                            and (tgt is not None or not mapper.last_clamped)):
+                        if click_mode == "direct":
+                            fire = dwell.update(render_pt[0], render_pt[1], now)
+                            if fire is not None:
+                                cursor.click(*fire)
+                                if config.CLICK_SOUND:
+                                    cursor.play_click_sound()
+                                tag = f" → {snap_label}" if snap_label else ""
+                                notify(f"CLICK #{dwell.clicks} at "
+                                       f"({fire[0]:.0f}, {fire[1]:.0f}){tag}")
+                        else:
+                            # Confirm mode: opens on ANY dwell, so even buttons
+                            # snap doesn't recognize (Dock/app icons) get a panel.
+                            fire = open_dwell.update(render_pt[0], render_pt[1], now)
+                            if fire is not None:
+                                confirm_target = ((tgt.cx, tgt.cy) if tgt is not None
+                                                  else (render_pt[0], render_pt[1]))
+                                panel = confirm.confirm_layout(
+                                    confirm_target[0], confirm_target[1],
+                                    screen_w, screen_h)
+                                overlay.open(panel)
+                                confirm_active = True
+                                choose_region, choose_t = None, now
+                                confirm_deadline = now + config.CONFIRM_TIMEOUT_S
+                                open_dwell.reset()
+                                notify("panel: glide to ✓ Click or ✕ Cancel")
 
             now_mono = time.monotonic()
+
+            # Claude summon panel — show on state change, keep pumped while up,
+            # auto-dismiss the answer after a while.
+            s_state, s_text = summoner.snapshot()
+            if s_state != "idle":
+                if not summon_visible or s_state != summon_last_state:
+                    title = {"thinking": "🧠 Claude — looking…",
+                             "done": "🧠 Claude",
+                             "error": "⚠ Claude"}.get(s_state, "🧠 Claude")
+                    summon_overlay.show(s_text, title, screen_w, screen_h)
+                    summon_visible = True
+                    if s_state != "thinking":
+                        summon_shown_t = now_mono
+                summon_last_state = s_state
+                summon_overlay.pump()
+                if (s_state in ("done", "error")
+                        and now_mono - summon_shown_t > config.SUMMON_DISMISS_S):
+                    summon_overlay.hide()
+                    summoner.dismiss()
+                    summon_visible = False
+                    summon_last_state = None
+            elif summon_visible:
+                summon_overlay.hide()
+                summon_visible = False
+                summon_last_state = None
+
+            # Detect the onset of a motion-stream dropout (cursor freeze).
+            imu_age_ms = ((now_mono - last_imu_mono) * 1000.0
+                          if last_imu_mono is not None else 0.0)
+            if (last_imu_mono is not None and not stall_active
+                    and imu_age_ms > config.IMU_STALL_S * 1000.0):
+                stall_active = True
+                imu_stalls += 1
+
             if latencies and now_mono - last_hud > 1.0 / config.HUD_UPDATE_HZ:
                 last_hud = now_mono
                 avg = statistics.fmean(latencies)
                 p95 = sorted(latencies)[int(len(latencies) * 0.95) - 1]
-                if not engaged:
+                if stall_active:
+                    state = f"⚠ NO IMU {imu_age_ms:.0f}ms (AirPods?)"
+                elif not engaged:
                     state = "OFF — press [c] at screen center"
-                elif frozen:
-                    state = "FROZEN(tilt)"
+                elif confirm_active:
+                    state = "CONFIRM: glide ✓/✕"
                 elif not dwell.enabled:
                     state = "click:OFF"
+                elif click_mode == "confirm":
+                    pct = open_dwell.progress(now_mono)
+                    state = f"hover→panel:{'▆' * int(pct * 5):<5}" if pct > 0 else "confirm:armed"
                 else:
                     pct = dwell.progress(now_mono)
                     state = f"click:{'▆' * int(pct * 5):<5}" if pct > 0 else "click:armed"
@@ -335,14 +626,38 @@ def run(debug_angles: bool = False) -> None:
                 sys.stdout.write(
                     f"\rIMU {len(imu_times):3d} Hz | lat {avg:4.1f}/{p95:4.1f} ms "
                     f"| {pos} | {state} | {snap_txt} | clicks {dwell.clicks} "
-                    f"| roll {roll_delta_deg:+5.1f}°  ")
+                    f"| freezes {imu_stalls}  ")
                 sys.stdout.flush()
+
+                # Publish telemetry to the web control panel.
+                control.set_telemetry({
+                    "streaming": len(imu_times) > 0,
+                    "imu_hz": len(imu_times),
+                    "lat_avg": avg, "lat_p95": p95,
+                    "engaged": engaged, "clicking": dwell.enabled,
+                    "snap": snap_on, "scroll": scroll_enabled,
+                    "gestures": gestures_on, "confirm": click_mode == "confirm",
+                    "scroll_invert": scroll_invert,
+                    "cursor": [int(eased[0]), int(eased[1])] if eased else [0, 0],
+                    "clicks": dwell.clicks, "freezes": imu_stalls,
+                    "sensitivity": mapper.scale, "hold_time": dwell.dwell_s,
+                    "scroll_speed": scroll_speed,
+                    "app": tracker.app_name, "targets": tracker.last_count,
+                    "summon": summoner.snapshot()[0],
+                    "calibrated": calibrated, "calib_capturing": calib_capturing,
+                    "calib_have": {p: (p in calib_poses) for p in
+                                   ("center", "right", "up", "tilt")},
+                    "screen": [int(screen_w), int(screen_h)],
+                })
 
             sleep_left = frame_dt - (time.monotonic() - frame_start)
             if sleep_left > 0:
                 time.sleep(sleep_left)
 
     tracker.stop()
+    overlay.close()
+    summon_overlay.hide()
+    server.stop()
     print("\nengine: stopped")
 
 
