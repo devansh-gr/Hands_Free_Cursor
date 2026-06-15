@@ -63,7 +63,7 @@ _NEVER = {
 }
 
 _MAX_DEPTH = 60
-_MAX_NODES = 8000           # hard cap on elements visited per scan
+_MAX_NODES = 4000           # hard cap on elements visited per scan
 MAX_TARGET_H = 1e9          # set from config by TargetTracker; caps snap-target
                             # height so big thumbnails/cards aren't magnets
 _syswide = AXUIElementCreateSystemWide()

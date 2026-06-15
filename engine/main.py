@@ -114,6 +114,7 @@ def run(debug_angles: bool = False) -> None:
     summon_shown_t = 0.0
 
     snap_on = config.SNAP_ENABLED
+    snap_ctrl = snap.SnapController(config.SNAP_RADIUS_PX, config.SNAP_FULL_PX)
     gestures_on = True  # tilt-right = summon Claude; no cursor-freeze anymore
     scroll_invert = config.SCROLL_INVERT
     scroll_enabled = config.SCROLL_ENABLED  # runtime-toggleable from the web UI
@@ -483,28 +484,25 @@ def run(debug_angles: bool = False) -> None:
                         notify("confirm panel timed out — cancelled")
                 else:
                     # ---- NORMAL PHASE: snap to page targets, scroll, click ----
-                    # Magnetic snap, gated by speed so sweeping doesn't grab.
+                    # Sticky magnet (velocity-gated): locks onto ONE target and
+                    # holds it, so a dense field of buttons can't make the
+                    # cursor flip between them and spasm.
                     render_pt = eased
-                    tgt = None
+                    snapped = False
                     if snap_on:
                         gain = snap.speed_gain(speed_ema, config.SNAP_SPEED_SLOW_PX_S,
                                                config.SNAP_SPEED_FAST_PX_S)
-                        if gain > 0.0:
-                            tgt, dist = snap.nearest(tracker.snapshot(), eased[0],
-                                                     eased[1], config.SNAP_RADIUS_PX)
-                            if tgt is not None:
-                                render_pt, w = snap.snap_point(
-                                    eased, (tgt.cx, tgt.cy), dist,
-                                    config.SNAP_FULL_PX, config.SNAP_RADIUS_PX,
-                                    strength=gain)
-                                if w > 0.0:
-                                    snap_label = tgt.label
+                        rx, ry, lbl = snap_ctrl.update(
+                            tracker.snapshot(), eased[0], eased[1], gain)
+                        render_pt = (rx, ry)
+                        snap_label = lbl
+                        snapped = lbl is not None
 
-                    # Edge scroll. Engages when there's no target to grab OR
-                    # when the head is pushed PAST the edge (clamped) — so you
-                    # can always scroll up by pushing up, even past a toolbar,
-                    # while merely resting on a top button still clicks it.
-                    if scroll_enabled and (tgt is None or mapper.last_clamped):
+                    # Edge scroll. Engages when not locked to a target OR when
+                    # the head is pushed PAST the edge (clamped) — so you can
+                    # always scroll up by pushing up, even past a toolbar, while
+                    # merely resting on a top button still clicks it.
+                    if scroll_enabled and (not snapped or mapper.last_clamped):
                         sdir, sdepth = scroll.scroll_zone(
                             eased[1], screen_h, config.SCROLL_BAND_PX)
                         if sdir != 0:
@@ -534,7 +532,7 @@ def run(debug_angles: bool = False) -> None:
                     # pinned to an empty edge (so corners don't auto-fire). A
                     # snapped target overrides the clamp guard.
                     if (dwell.enabled and not scrolling
-                            and (tgt is not None or not mapper.last_clamped)):
+                            and (snapped or not mapper.last_clamped)):
                         if click_mode == "direct":
                             fire = dwell.update(render_pt[0], render_pt[1], now)
                             if fire is not None:
@@ -549,8 +547,7 @@ def run(debug_angles: bool = False) -> None:
                             # snap doesn't recognize (Dock/app icons) get a panel.
                             fire = open_dwell.update(render_pt[0], render_pt[1], now)
                             if fire is not None:
-                                confirm_target = ((tgt.cx, tgt.cy) if tgt is not None
-                                                  else (render_pt[0], render_pt[1]))
+                                confirm_target = (render_pt[0], render_pt[1])
                                 panel = confirm.confirm_layout(
                                     confirm_target[0], confirm_target[1],
                                     screen_w, screen_h)

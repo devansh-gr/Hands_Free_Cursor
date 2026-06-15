@@ -21,9 +21,9 @@ Y_RANGE_DEG = 9.0
 # Reads real clickable elements from the macOS Accessibility tree (NOT vision)
 # and pulls the cursor onto the nearest one — fixes "near but never spot-on".
 SNAP_ENABLED = True
-SNAP_RADIUS_PX = 70.0        # within this of a target, the cursor gets pulled in
-SNAP_FULL_PX = 36.0          # within this, cursor fully sticks to target center
-                             # (generous so small buttons lock + dwell-click)
+SNAP_RADIUS_PX = 55.0        # must be THIS close to acquire a target (smaller =
+                             # less grabby; the sticky controller then holds it)
+SNAP_FULL_PX = 30.0          # within this, cursor fully sticks to target center
 # Don't snap to BIG targets — video thumbnails/cards are tall links and would
 # magnet the cursor all over content pages (e.g. YouTube). Real controls
 # (buttons, tabs, toolbar items, text links) are short.
@@ -34,7 +34,7 @@ SNAP_SPEED_SLOW_PX_S = 150.0  # at/below this cursor speed: full magnet
 SNAP_SPEED_FAST_PX_S = 650.0  # at/above this cursor speed: magnet off
 TARGET_REFRESH_HZ = 5.0      # how often the background thread re-scans the UI
 TARGET_WALK_TIMEOUT_S = 0.5   # bail out of a slow AX-tree walk (e.g. huge pages)
-TARGET_MAX_ELEMENTS = 1500   # safety cap on elements collected per scan
+TARGET_MAX_ELEMENTS = 600    # cap elements per scan (fewer = less magnet noise)
 
 # --- edge-dwell scroll ---
 SCROLL_ENABLED = True

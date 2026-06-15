@@ -51,6 +51,51 @@ def snap_point(cursor_xy: tuple[float, float], target_xy: tuple[float, float],
     return (cx + (tx - cx) * w, cy + (ty - cy) * w), w
 
 
+class SnapController:
+    """Sticky magnet: once locked onto a target, the cursor STAYS on it until
+    the head clearly moves away (release radius) or clearly toward a different
+    target (it becomes much closer). Without this, a dense field of targets
+    makes the nearest flip every frame and the cursor spasms."""
+
+    def __init__(self, acquire_radius: float, full_px: float,
+                 release_mult: float = 1.4, switch_ratio: float = 0.55) -> None:
+        self.acquire = acquire_radius
+        self.full = full_px
+        self.release = acquire_radius * release_mult
+        self.switch_ratio = switch_ratio
+        self._locked: tuple[float, float, str] | None = None
+
+    def update(self, targets, x: float, y: float, gain: float):
+        """Returns (render_x, render_y, label|None). gain (0..1) is the velocity
+        gate; 0 = no magnet."""
+        if gain <= 0.0:
+            self._locked = None
+            return x, y, None
+
+        best, bd = None, float("inf")
+        for t in targets:
+            d = ((t.cx - x) ** 2 + (t.cy - y) ** 2) ** 0.5
+            if d < bd:
+                best, bd = t, d
+
+        if self._locked is not None:
+            lx, ly, _ = self._locked
+            ld = ((lx - x) ** 2 + (ly - y) ** 2) ** 0.5
+            if ld > self.release:
+                self._locked = None                      # wandered off — release
+            elif best is not None and bd < ld * self.switch_ratio:
+                self._locked = (best.cx, best.cy, best.label)  # decisively closer
+        if self._locked is None and best is not None and bd <= self.acquire:
+            self._locked = (best.cx, best.cy, best.label)
+
+        if self._locked is None:
+            return x, y, None
+        lx, ly, label = self._locked
+        d = ((lx - x) ** 2 + (ly - y) ** 2) ** 0.5
+        w = pull_weight(d, self.full, self.acquire) * max(0.0, min(1.0, gain))
+        return x + (lx - x) * w, y + (ly - y) * w, (label if w > 0.0 else None)
+
+
 def nearest(targets, x: float, y: float, radius: float):
     """Closest target within radius, as (target, distance), else (None, inf)."""
     best, best_d = None, float("inf")

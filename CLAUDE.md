@@ -92,9 +92,16 @@ and the **element under the cursor is always added** (climb to pressable
 ancestor) so the pointed-at thing is lockable even if the bounded walk missed
 it. Budget: 1500 elems / 8000 nodes / 0.5 s.
 
-`snap.py` (pure, unit-tested) pulls the head-driven
-cursor onto the nearest element within `SNAP_RADIUS_PX`, fully sticking within
-`SNAP_FULL_PX`. The dwell anchors at the *snapped* point, so clicks land
+**`SnapController` (sticky, 2026-06-15)** is the live path: once locked onto a
+target it HOLDS it until the head leaves the release radius (acquire×1.4) or a
+different target becomes decisively closer (<55% of the locked distance). This
+fixed the "spasming / snaps onto everything" regression — without stickiness,
+the per-frame nearest flips between adjacent targets in a dense field. The
+AXPress + breadth-first + big-budget change had flooded the target set; budget
+pulled back (600 elems / 4000 nodes) and acquire radius tightened to 55px.
+`snap.py` also has standalone `nearest`/`snap_point` (still used for the
+2-button confirm panel) and `speed_gain` (velocity gate feeds the controller).
+The older non-sticky pull: The dwell anchors at the *snapped* point, so clicks land
 dead-center. Snap ignores targets taller than `SNAP_MAX_TARGET_H` (~64px) so
 big thumbnails/cards (YouTube) don't magnet the cursor; real controls are
 short. Top-edge buttons (Chrome new-tab/close): the edge-clamp dwell guard
