@@ -10,10 +10,12 @@ UDP_PORT = 8077
 # The engine refuses to start without it.
 
 # --- engage ---
-# Auto-engage cursor control as soon as IMU data flows (no need to press [c]).
-# The current head pose at first sample becomes screen center; [c] re-centers,
-# [SPACE] pauses/resumes. Set False to require a manual [c] to start.
+# Auto-engage cursor control once IMU data flows (no need to press [c]). It
+# waits AUTO_ENGAGE_WARMUP_S after the first sample before capturing center —
+# the AirPods motion fusion needs a moment to settle, and capturing the origin
+# too early makes the cursor drift off toward a corner. [c] re-centers anytime.
 AUTO_ENGAGE = True
+AUTO_ENGAGE_WARMUP_S = 1.5
 
 # --- absolute mapping ---
 # Head sweep (degrees from center) that spans the full screen. Smaller = MORE

@@ -127,7 +127,9 @@ def run(debug_angles: bool = False) -> None:
                             config.TARGET_WALK_TIMEOUT_S, screen_w * screen_h,
                             config.SNAP_MAX_TARGET_H)
     tracker.start()
-    pending_recenter = config.AUTO_ENGAGE  # engage on the first IMU sample
+    pending_recenter = False
+    stream_start_mono: float | None = None  # when IMU first started flowing
+    auto_engaged = False
 
     if not cursor.accessibility_trusted():
         print("WARNING: no Accessibility permission — cursor events will be dropped.")
@@ -138,9 +140,10 @@ def run(debug_angles: bool = False) -> None:
     print("engine: waiting for first IMU sample (start the bridge, AirPods in-ear)…")
     print()
     if config.AUTO_ENGAGE:
-        print("AUTO-ENGAGE: control turns on the moment your AirPods stream.")
-        print("  • look at screen center as it starts (that pose becomes center)")
-        print("  • [c] re-center anytime  • [SPACE] pause/resume  • [q] quit")
+        print(f"AUTO-ENGAGE: control turns on ~{config.AUTO_ENGAGE_WARMUP_S:.0f}s "
+              "after your AirPods start streaming.")
+        print("  • look at screen center while it warms up (that pose = center)")
+        print("  • [c] re-center anytime it drifts  • [SPACE] pause  • [q] quit")
     else:
         print("Press [c] (looking at screen center) to engage.")
     print()
@@ -279,6 +282,15 @@ def run(debug_angles: bool = False) -> None:
                 x_angle = fx(angles[axes["x_source"]], sample["t"])
                 y_angle = fy(angles[axes["y_source"]], sample["t"])
                 roll_deg = math.degrees(angles[axes["tilt_source"]])
+
+                # Auto-engage after a brief warmup so the sensor (and the user's
+                # head) settle before this pose is captured as screen center.
+                if config.AUTO_ENGAGE and not auto_engaged:
+                    if stream_start_mono is None:
+                        stream_start_mono = time.monotonic()
+                    elif time.monotonic() - stream_start_mono >= config.AUTO_ENGAGE_WARMUP_S:
+                        pending_recenter = True
+                        auto_engaged = True
 
                 if key == "c" or pending_recenter:
                     pending_recenter = False
