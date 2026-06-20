@@ -22,8 +22,13 @@ AUTO_ENGAGE_WARMUP_S = 1.5
 # sensitive (less head travel per pixel). Magnetic snap covers fine precision,
 # so this can be sensitive. Live-tunable at runtime with [-]/[=]; the chosen
 # multiplier persists to axes.json (range_scale).
-X_RANGE_DEG = 12.0
-Y_RANGE_DEG = 9.0
+X_RANGE_DEG = 10.5
+Y_RANGE_DEG = 8.0
+
+# --- glowing cursor ---
+# A neon arrow replaces the cursor and turns green when locked onto a button.
+CURSOR_GLOW = True
+CURSOR_HIDE_SYSTEM = True   # hide the real macOS cursor while engaged
 
 # --- magnetic targeting (snap-to-button) ---
 # Reads real clickable elements from the macOS Accessibility tree (NOT vision)

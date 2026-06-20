@@ -223,6 +223,20 @@ opened. Now: `DWELL_RADIUS_PX=80`, `DWELL_REARM_RADIUS_PX=130`,
 without the ✓ confirm. Confirm opens on ANY dwell (see confirm section), so it
 works on app/Dock buttons snap doesn't recognize.
 
+## Neon cursor (`cursorfx.py`, 2026-06-20)
+
+`CursorGlow` draws a glowing **arrow** (normal pointer shape, tip at the
+hotspot) as a click-through top-level overlay; cyan normally, **green when
+locked onto a snap target**. The real macOS cursor is HIDDEN while engaged
+(`cursor.hide_system_cursor` → `CGDisplayHideCursor`) so only the neon arrow
+shows — the hardware cursor always renders above app windows, so occluding it
+isn't possible; hiding is the only way. Restored on engage→pause, on clean
+exit, AND via `atexit.register(cursor.show_system_cursor)` so a crash never
+leaves the user cursor-less. PERF: redrawing a transparent window is ~7ms, so
+the arrow MOVES every frame (`setFrameOrigin` ~0.06ms) but only REDRAWS on a
+lock-color change — net ~0.2-0.7ms/frame. Toggles: `config.CURSOR_GLOW`,
+`config.CURSOR_HIDE_SYSTEM`.
+
 ## State (update when milestones move)
 
 - **M1 ✓** head→cursor. **M2 ✓** dwell-click + tilt gestures. **Magnetic

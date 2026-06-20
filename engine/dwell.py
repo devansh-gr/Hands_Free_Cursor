@@ -1,8 +1,7 @@
 """Dwell-to-click state machine.
 
 Park the cursor within a radius for DWELL_TIME_S => exactly one click at the
-anchor point. Re-arms only after the cursor leaves a LARGER radius (hysteresis),
-so staring at one spot can never machine-gun clicks.
+qdso staring at one spot can never machine-gun clicks.
 """
 
 import math

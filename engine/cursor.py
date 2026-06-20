@@ -46,6 +46,22 @@ def play_click_sound() -> None:
         pass
 
 
+def hide_system_cursor() -> None:
+    """Hide the real macOS cursor (so our neon arrow stands in for it).
+    Counted — must be balanced by show_system_cursor()."""
+    try:
+        Quartz.CGDisplayHideCursor(Quartz.CGMainDisplayID())
+    except Exception:
+        pass
+
+
+def show_system_cursor() -> None:
+    try:
+        Quartz.CGDisplayShowCursor(Quartz.CGMainDisplayID())
+    except Exception:
+        pass
+
+
 def accessibility_trusted() -> bool:
     """True if this process may post events. False => events are dropped silently."""
     try:
