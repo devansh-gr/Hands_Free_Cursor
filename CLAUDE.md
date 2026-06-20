@@ -54,7 +54,12 @@ AirPods 4 ──CoreMotion──► bridge (Swift) ──UDP 8077 JSON──► 
    that way.
 3. **Safety invariants** (born from a runaway-cursor incident — the user
    could not control their own mouse):
-   - engine starts inert; no cursor output until the user presses `c`
+   - AUTO-ENGAGE (config.AUTO_ENGAGE, default True): control turns on at the
+     first IMU sample (first pose = screen center); owner asked for no manual
+     `c`. `c` re-centers, `SPACE` pauses/resumes, `q` quits — escape hatches
+     remain. The old "inert until `c`" safe-start is OFF by default now; the
+     runaway-cursor causes it guarded (axis math, edge-click, click-on-launch)
+     are all separately fixed + confirm-click prevents accidental clicks.
    - clicking starts OFF every launch; `d` or tilt-left enables
    - spacebar = instant panic freeze; keyboard must always win
    - no dwell-click while edge-clamped (corners are "parked" by definition)
@@ -176,25 +181,17 @@ per-region snap cooldown, a "snap to the target you're moving toward" velocity
 heuristic, temporarily widening SNAP_FULL only for isolated targets, or a
 density check that weakens the magnet where targets are clustered.
 
-## Web control panel (`server.py` + `web/index.html`)
+## Web control panel — REMOVED (2026-06-19)
 
-HARD BROWSER LIMITS (do not try to "move this fully into the browser"): a web
-page CANNOT read AirPods motion (no CoreMotion/Web-Bluetooth path) and CANNOT
-move the macOS cursor (sandbox). So the website is a **front-end to the local
-engine**, not a standalone app. `server.py` is a stdlib-only (no pip deps)
-`ThreadingHTTPServer` that serves the page, streams telemetry over **SSE**
-(`GET /events`), and takes commands over **POST `/cmd`**. The engine main loop
-`control.drain()`s commands each frame and `control.set_telemetry()`s at HUD
-rate. Engine auto-opens `http://127.0.0.1:8765/` and keeps terminal keys
-working too (dual control). Connection resets from the browser are silenced in
-`_QuietServer.handle_error`.
-
-Web also does first-run **axis calibration** (capture center/right/up/tilt →
-`compute_axes` in calibrate.py → axes.json), so the engine no longer hard-exits
-when axes.json is missing — it starts uncalibrated with `DEFAULT_AXES`, and
-engage is gated on `calibrated`. Runtime-settable from the panel: engage/stop,
-clicking, snap, scroll on/off + direction, gestures, confirm/direct mode,
-invert X/Y, sensitivity (mapper scale), hold time, scroll speed.
+The owner decided the demo just runs on his Mac, so the whole web layer was
+deleted: `server.py`, `web/index.html`, and all engine wiring (Control/
+ControlServer, the `/cmd` command channel, SSE telemetry, web axis-calibration
+capture, `webbrowser.open`). If a control surface is ever wanted again, it
+must be a local front-end to the engine (a browser CANNOT read AirPods motion
+or move the macOS cursor). The engine now requires `axes.json` again (hard-exit
+with a "run --calibrate" message if missing) — calibration is terminal-only
+(`run_engine.sh --calibrate`); there is no in-engine web calibration anymore.
+All control is keyboard + head gestures (see the startup banner).
 
 ## M3 — Claude summon (tilt-right "huh?")  ✓ built 2026-06-15
 

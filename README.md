@@ -52,19 +52,11 @@ First run only:
    tilt-right on *your* head and writes `engine/axes.json`. The engine
    refuses to start without it. Re-run any time it feels wrong.
 
-Keys while running: `c` = recenter+engage (look at screen center first),
-`space` = panic freeze, `d` = clicking on/off, `q` = quit. The engine starts
-inert: no cursor motion until `c`, no clicking until `d`.
-
-## Web control panel
-
-When the engine starts it also serves a local control panel and opens it in
-your browser at **http://127.0.0.1:8765/**. From the page you can see AirPods
-connection status + live telemetry (IMU Hz, latency, clicks), run the guided
-axis calibration, press Start/Stop, and tune sensitivity / hold-time / scroll
-speed / feature toggles — all live. Note: the browser can't read AirPods motion
-or move the cursor itself (sandbox), so the page is a front-end to the local
-engine, which must be running. Terminal keys keep working alongside it.
+Control **auto-engages** the moment the AirPods start streaming (look at screen
+center as it starts — that pose becomes center). Keys while running: `c` =
+re-center, `space` = pause/resume, `d` = clicking on/off, `m` = click mode,
+`g` = tilt gestures, `q` = quit. Tilt your head **right** ("huh?") to summon
+Claude on your screen.
 
 ## Tuning
 

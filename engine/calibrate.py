@@ -104,29 +104,6 @@ def IMUReceiver_or_die() -> IMUReceiver:
             f"cannot bind UDP {config.UDP_PORT} — is another engine instance running? ({e})")
 
 
-def compute_axes(base: dict, right: dict, up: dict, tilt: dict) -> dict:
-    """Derive the axis mapping from one center baseline and three held poses
-    (look-right, look-up, tilt-right), each a {channel: radians} dict. Shared
-    by the terminal wizard and the web control panel. Raises if the poses
-    don't separate into three distinct channels."""
-    def dominant(held):
-        deltas = {k: wrap_angle(held[k] - base[k]) for k in CHANNELS}
-        ch = max(deltas, key=lambda k: abs(deltas[k]))
-        return ch, deltas[ch]
-
-    x_src, x_delta = dominant(right)
-    y_src, y_delta = dominant(up)
-    t_src, t_delta = dominant(tilt)
-    if len({x_src, y_src, t_src}) != 3:
-        raise ValueError(
-            f"poses collided ({x_src}/{y_src}/{t_src}) — exaggerate each move (~20°+)")
-    return {
-        "x_source": x_src, "x_sign": 1.0 if x_delta > 0 else -1.0,
-        "y_source": y_src, "y_sign": -1.0 if y_delta > 0 else 1.0,
-        "tilt_source": t_src, "tilt_sign": 1.0 if t_delta > 0 else -1.0,
-    }
-
-
 def load_axes() -> dict | None:
     """Calibrated axes, or None if the wizard hasn't been run."""
     if not os.path.exists(AXES_PATH):

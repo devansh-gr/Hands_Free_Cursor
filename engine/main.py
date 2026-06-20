@@ -16,7 +16,6 @@ import sys
 import termios
 import time
 import tty
-import webbrowser
 
 import config
 import confirm
@@ -24,14 +23,13 @@ import cursor
 import scroll
 import snap
 import summon as summon_mod
-from calibrate import compute_axes, load_axes, run_calibration, save_axes
+from calibrate import load_axes, run_calibration, save_axes
 from dwell import DwellClicker
 from filters import OneEuro
 from gestures import TiltDetector
 from imu_rx import IMUReceiver
 from mapping import AbsoluteMapper
-from pose import head_euler, wrap_angle
-from server import Control, ControlServer
+from pose import head_euler
 from targets import TargetTracker
 
 
@@ -71,9 +69,13 @@ DEFAULT_AXES = {"x_source": "heading", "x_sign": 1.0,
 
 
 def run(debug_angles: bool = False) -> None:
-    loaded = load_axes()
-    calibrated = loaded is not None
-    axes = loaded if loaded is not None else dict(DEFAULT_AXES)
+    axes = load_axes()
+    if axes is None:
+        if not debug_angles:
+            print("No axis calibration found. Run once (~20s, guided):")
+            print("  ~/Documents/Projects/AirPods_Telekinesis/run_engine.sh --calibrate")
+            sys.exit(1)
+        axes = dict(DEFAULT_AXES)  # debug-angles doesn't use the mapping
 
     rx = IMUReceiver(config.UDP_HOST, config.UDP_PORT)
     screen_w, screen_h = cursor.screen_size()
@@ -117,7 +119,7 @@ def run(debug_angles: bool = False) -> None:
     snap_ctrl = snap.SnapController(config.SNAP_RADIUS_PX, config.SNAP_FULL_PX)
     gestures_on = True  # tilt-right = summon Claude; no cursor-freeze anymore
     scroll_invert = config.SCROLL_INVERT
-    scroll_enabled = config.SCROLL_ENABLED  # runtime-toggleable from the web UI
+    scroll_enabled = config.SCROLL_ENABLED
     scroll_speed = config.SCROLL_MAX_SPEED
     scroll_accum = 0.0
     scroll_arm_t: float | None = None
@@ -125,20 +127,7 @@ def run(debug_angles: bool = False) -> None:
                             config.TARGET_WALK_TIMEOUT_S, screen_w * screen_h,
                             config.SNAP_MAX_TARGET_H)
     tracker.start()
-
-    # Web control panel — the engine serves a localhost page that drives all of
-    # the below over SSE/POST (the browser itself can't touch AirPods/cursor).
-    control = Control()
-    server = ControlServer(control)
-    server.start()
-    pending_recenter = False
-    calib_capturing: str | None = None   # pose being captured ("center"/...)
-    calib_until = 0.0
-    calib_ref: dict | None = None
-    calib_acc: dict[str, float] = {}
-    calib_n = 0
-    calib_poses: dict[str, dict] = {}
-    CHANS = ("heading", "elevation", "tilt")
+    pending_recenter = config.AUTO_ENGAGE  # engage on the first IMU sample
 
     if not cursor.accessibility_trusted():
         print("WARNING: no Accessibility permission — cursor events will be dropped.")
@@ -146,17 +135,14 @@ def run(debug_angles: bool = False) -> None:
 
     print(f"engine: listening on udp://{config.UDP_HOST}:{config.UDP_PORT}, "
           f"screen {screen_w:.0f}x{screen_h:.0f}")
-    print(f"\n  ▶ CONTROL PANEL: {server.url}  (opening in your browser)\n")
-    try:
-        webbrowser.open(server.url)
-    except Exception:
-        pass
     print("engine: waiting for first IMU sample (start the bridge, AirPods in-ear)…")
     print()
-    print("SAFE START: the cursor will NOT move until you press [c].")
-    print("  1. look at the CENTER of your screen")
-    print("  2. press [c]  → cursor control engages, calibrated to that pose")
-    print("  3. press [d] when ready to enable clicking (starts OFF)")
+    if config.AUTO_ENGAGE:
+        print("AUTO-ENGAGE: control turns on the moment your AirPods stream.")
+        print("  • look at screen center as it starts (that pose becomes center)")
+        print("  • [c] re-center anytime  • [SPACE] pause/resume  • [q] quit")
+    else:
+        print("Press [c] (looking at screen center) to engage.")
     print()
     print(f"CLICK MODE: {click_mode.upper()}  "
           f"({'hover a button → ✓Click/✕Cancel panel → glide to choose' if click_mode == 'confirm' else 'dwell on a button → clicks directly'})")
@@ -262,84 +248,6 @@ def run(debug_angles: bool = False) -> None:
                 save_axes(axes)
                 notify(f"left/right inverted (x_sign {mapper.x_sign:+.0f}) — saved")
 
-            # ---- commands from the web control panel ----
-            for cmd in control.drain():
-                a, v = cmd["action"], cmd.get("value")
-                if a == "engage":
-                    pending_recenter = True
-                elif a == "stop":
-                    engaged = False
-                    eased = target = None
-                    if confirm_active:
-                        overlay.close()
-                        confirm_active = False
-                    notify("stopped (web)")
-                elif a == "clicking":
-                    dwell.enabled = bool(v)
-                elif a == "snap":
-                    snap_on = bool(v)
-                elif a == "scroll_enabled":
-                    scroll_enabled = bool(v)
-                elif a == "gestures":
-                    gestures_on = bool(v)
-                elif a == "scroll_invert":
-                    scroll_invert = bool(v)
-                elif a == "confirm_mode":
-                    click_mode = "confirm" if (v and overlay.available) else "direct"
-                    if confirm_active:
-                        overlay.close()
-                        confirm_active = False
-                    open_dwell.reset()
-                    dwell.reset()
-                elif a == "invert_y":
-                    mapper.y_sign *= -1.0
-                    axes["y_sign"] = mapper.y_sign
-                    save_axes(axes)
-                elif a == "invert_x":
-                    mapper.x_sign *= -1.0
-                    axes["x_sign"] = mapper.x_sign
-                    save_axes(axes)
-                elif a == "sensitivity":
-                    mapper.set_scale(float(v))
-                    axes["range_scale"] = mapper.scale
-                    save_axes(axes)
-                elif a == "hold_time":
-                    ht = min(2.0, max(0.2, float(v)))
-                    dwell.dwell_s = ht
-                    open_dwell.dwell_s = ht
-                    axes["dwell_time"] = ht
-                    save_axes(axes)
-                elif a == "scroll_speed":
-                    scroll_speed = float(v)
-                elif a == "calib":
-                    if v in ("center", "right", "up", "tilt"):
-                        calib_capturing = v
-                        calib_ref = None
-                        calib_acc = {k: 0.0 for k in CHANS}
-                        calib_n = 0
-                        calib_until = time.monotonic() + 0.7
-                        notify(f"calibrating: hold '{v}' pose…")
-                elif a == "calib_finish":
-                    need = ("center", "right", "up", "tilt")
-                    if all(p in calib_poses for p in need):
-                        try:
-                            new_axes = compute_axes(
-                                calib_poses["center"], calib_poses["right"],
-                                calib_poses["up"], calib_poses["tilt"])
-                            new_axes["range_scale"] = mapper.scale
-                            new_axes["dwell_time"] = dwell.dwell_s
-                            axes = new_axes
-                            mapper.x_sign, mapper.y_sign = axes["x_sign"], axes["y_sign"]
-                            tilt.right_sign = axes["tilt_sign"]
-                            tilt.set_baseline(0.0)
-                            save_axes(axes)
-                            calibrated = True
-                            notify("✓ calibration saved — press Start to engage")
-                        except ValueError as e:
-                            notify(f"calibration failed: {e}")
-                    else:
-                        notify("calibration incomplete — capture all 4 poses first")
-
             sample = rx.latest()
             if sample is not None:
                 # Recovered from a motion-stream dropout — report how long it froze.
@@ -360,20 +268,6 @@ def run(debug_angles: bool = False) -> None:
                     latencies.pop(0)
                 imu_times[:] = [t for t in imu_times if now - t < 1.0]
 
-                # Web axis-calibration: average a held pose over its capture window.
-                if calib_capturing is not None:
-                    if calib_ref is None:
-                        calib_ref = dict(angles)
-                    for kk in CHANS:
-                        calib_acc[kk] += wrap_angle(angles[kk] - calib_ref[kk])
-                    calib_n += 1
-                    if time.monotonic() >= calib_until and calib_n >= 5:
-                        calib_poses[calib_capturing] = {
-                            kk: calib_ref[kk] + calib_acc[kk] / calib_n for kk in CHANS}
-                        notify(f"captured '{calib_capturing}' pose ✓")
-                        calib_capturing = None
-                        calib_ref = None
-
                 if debug_angles:
                     sys.stdout.write(
                         f"\rheading {math.degrees(angles['heading']):+7.2f}°  "
@@ -388,14 +282,11 @@ def run(debug_angles: bool = False) -> None:
 
                 if key == "c" or pending_recenter:
                     pending_recenter = False
-                    if not calibrated:
-                        notify("calibrate axes first (control panel or --calibrate)")
-                    else:
-                        mapper.recenter(x_angle, y_angle)
-                        tilt.set_baseline(roll_deg)
-                        dwell.reset()
-                        engaged = True
-                        notify("recentered + ENGAGED — current pose is screen center")
+                    mapper.recenter(x_angle, y_angle)
+                    tilt.set_baseline(roll_deg)
+                    dwell.reset()
+                    engaged = True
+                    notify("recentered + ENGAGED — current pose is screen center")
 
                 if engaged:
                     if gestures_on:
@@ -626,27 +517,6 @@ def run(debug_angles: bool = False) -> None:
                     f"| freezes {imu_stalls}  ")
                 sys.stdout.flush()
 
-                # Publish telemetry to the web control panel.
-                control.set_telemetry({
-                    "streaming": len(imu_times) > 0,
-                    "imu_hz": len(imu_times),
-                    "lat_avg": avg, "lat_p95": p95,
-                    "engaged": engaged, "clicking": dwell.enabled,
-                    "snap": snap_on, "scroll": scroll_enabled,
-                    "gestures": gestures_on, "confirm": click_mode == "confirm",
-                    "scroll_invert": scroll_invert,
-                    "cursor": [int(eased[0]), int(eased[1])] if eased else [0, 0],
-                    "clicks": dwell.clicks, "freezes": imu_stalls,
-                    "sensitivity": mapper.scale, "hold_time": dwell.dwell_s,
-                    "scroll_speed": scroll_speed,
-                    "app": tracker.app_name, "targets": tracker.last_count,
-                    "summon": summoner.snapshot()[0],
-                    "calibrated": calibrated, "calib_capturing": calib_capturing,
-                    "calib_have": {p: (p in calib_poses) for p in
-                                   ("center", "right", "up", "tilt")},
-                    "screen": [int(screen_w), int(screen_h)],
-                })
-
             sleep_left = frame_dt - (time.monotonic() - frame_start)
             if sleep_left > 0:
                 time.sleep(sleep_left)
@@ -654,7 +524,6 @@ def run(debug_angles: bool = False) -> None:
     tracker.stop()
     overlay.close()
     summon_overlay.hide()
-    server.stop()
     print("\nengine: stopped")
 
 

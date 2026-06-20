@@ -9,6 +9,12 @@ UDP_PORT = 8077
 # writes axes.json (which angle channel drives cursor X/Y/gestures + signs).
 # The engine refuses to start without it.
 
+# --- engage ---
+# Auto-engage cursor control as soon as IMU data flows (no need to press [c]).
+# The current head pose at first sample becomes screen center; [c] re-centers,
+# [SPACE] pauses/resumes. Set False to require a manual [c] to start.
+AUTO_ENGAGE = True
+
 # --- absolute mapping ---
 # Head sweep (degrees from center) that spans the full screen. Smaller = MORE
 # sensitive (less head travel per pixel). Magnetic snap covers fine precision,
