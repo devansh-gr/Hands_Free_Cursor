@@ -9,7 +9,6 @@ Keys: [c] recenter   [d] toggle dwell clicking   [q] quit
 Run with --debug-angles to verify axis assignment before first calibration.
 """
 
-import atexit
 import math
 import select
 import statistics
@@ -21,7 +20,6 @@ import tty
 import config
 import confirm
 import cursor
-import cursorfx
 import scroll
 import snap
 import summon as summon_mod
@@ -110,11 +108,6 @@ def run(debug_angles: bool = False) -> None:
     choose_t = 0.0
     confirm_deadline = 0.0
 
-    glow = cursorfx.CursorGlow() if config.CURSOR_GLOW else None
-    if config.CURSOR_GLOW and config.CURSOR_HIDE_SYSTEM:
-        # Safety net: always restore the real cursor on exit, even on a crash.
-        atexit.register(cursor.show_system_cursor)
-
     # Claude summon (tilt-right): screenshot -> claude CLI -> answer panel.
     summoner = summon_mod.Summoner()
     summon_overlay = summon_mod.TextOverlay()
@@ -137,7 +130,6 @@ def run(debug_angles: bool = False) -> None:
     pending_recenter = False
     stream_start_mono: float | None = None  # when IMU first started flowing
     auto_engaged = False
-    sys_cursor_hidden = False
 
     if not cursor.accessibility_trusted():
         print("WARNING: no Accessibility permission — cursor events will be dropped.")
@@ -330,8 +322,6 @@ def run(debug_angles: bool = False) -> None:
 
             snap_label = None
             scrolling = False
-            glow_xy: tuple[float, float] | None = None
-            glow_locked = False
             if engaged and target is not None and not debug_angles:
                 if eased is None:
                     eased = target
@@ -369,7 +359,6 @@ def run(debug_angles: bool = False) -> None:
                             eased, best, bd, config.SNAP_FULL_PX,
                             config.SNAP_RADIUS_PX, strength=1.0)
                     cursor.move(*render_pt)
-                    glow_xy, glow_locked = render_pt, (bd < config.SNAP_RADIUS_PX)
 
                     region = confirm.region_at(panel, render_pt[0], render_pt[1])
                     if region != choose_region:
@@ -441,7 +430,6 @@ def run(debug_angles: bool = False) -> None:
                         scroll_accum = 0.0
 
                     cursor.move(*render_pt)
-                    glow_xy, glow_locked = render_pt, snapped
 
                     # Click / open-confirm. Allowed when not scrolling and not
                     # pinned to an empty edge (so corners don't auto-fire). A
@@ -474,20 +462,6 @@ def run(debug_angles: bool = False) -> None:
                                 notify("panel: glide to ✓ Click or ✕ Cancel")
 
             now_mono = time.monotonic()
-
-            # Neon arrow cursor — follows every frame; hides the real macOS
-            # cursor while engaged so only the glowing one shows.
-            if glow is not None:
-                if engaged and glow_xy is not None:
-                    if config.CURSOR_HIDE_SYSTEM and not sys_cursor_hidden:
-                        cursor.hide_system_cursor()
-                        sys_cursor_hidden = True
-                    glow.update(glow_xy[0], glow_xy[1], screen_h, glow_locked, now_mono)
-                else:
-                    glow.hide()
-                    if sys_cursor_hidden:
-                        cursor.show_system_cursor()
-                        sys_cursor_hidden = False
 
             # Claude summon panel — show on state change, keep pumped while up,
             # auto-dismiss the answer after a while.
@@ -562,10 +536,6 @@ def run(debug_angles: bool = False) -> None:
     tracker.stop()
     overlay.close()
     summon_overlay.hide()
-    if glow is not None:
-        glow.hide()
-    if sys_cursor_hidden:
-        cursor.show_system_cursor()  # always restore the real cursor on exit
     print("\nengine: stopped")
 
 

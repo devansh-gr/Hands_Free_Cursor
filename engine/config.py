@@ -25,11 +25,6 @@ AUTO_ENGAGE_WARMUP_S = 1.5
 X_RANGE_DEG = 10.5
 Y_RANGE_DEG = 8.0
 
-# --- glowing cursor ---
-# A neon arrow replaces the cursor and turns green when locked onto a button.
-CURSOR_GLOW = True
-CURSOR_HIDE_SYSTEM = True   # hide the real macOS cursor while engaged
-
 # --- magnetic targeting (snap-to-button) ---
 # Reads real clickable elements from the macOS Accessibility tree (NOT vision)
 # and pulls the cursor onto the nearest one — fixes "near but never spot-on".

@@ -12,7 +12,7 @@ import subprocess
 import threading
 
 SHOT_PATH = "/tmp/telekinesis_shot.png"
-MODEL = "claude-opus-4-8"
+MODEL = "claude-haiku-4-5"  # fast; opus was ~18s, haiku is much quicker
 DEFAULT_PROMPT = ("What's on my screen, and what's the single most useful thing "
                   "I could do next? Answer in under 3 sentences, plainly.")
 
