@@ -383,9 +383,9 @@ def run(debug_angles: bool = False) -> None:
                     if snap_on:
                         gain = snap.speed_gain(speed_ema, config.SNAP_SPEED_SLOW_PX_S,
                                                config.SNAP_SPEED_FAST_PX_S)
-                        rx, ry, lbl = snap_ctrl.update(
+                        sx, sy, lbl = snap_ctrl.update(
                             tracker.snapshot(), eased[0], eased[1], gain)
-                        render_pt = (rx, ry)
+                        render_pt = (sx, sy)
                         snap_label = lbl
                         snapped = lbl is not None
 
